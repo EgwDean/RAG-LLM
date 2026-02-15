@@ -122,12 +122,18 @@ def main():
         print(f"  Loading data...")
         try:
             loader = GenericDataLoader(dataset_path)
-            if 'test' in loader.qrels_file: 
-                 split = 'test'
-            elif 'train' in loader.qrels_file:
-                 split = 'train'
-            else:
-                 split = 'dev'
+            
+            # Try to load splits in order of preference: test, train, dev
+            split = None
+            for candidate_split in ['test', 'train', 'dev']:
+                qrels_file = os.path.join(dataset_path, 'qrels', f'{candidate_split}.tsv')
+                if os.path.exists(qrels_file):
+                    split = candidate_split
+                    break
+            
+            if split is None:
+                print(f"  Warning: No valid split found for {dataset_name}, skipping.")
+                continue
                  
             corpus, queries, qrels = loader.load(split=split)
             print(f"  Loaded split: {split}")
