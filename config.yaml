@@ -1,0 +1,11 @@
+# --- DATASET CONFIGURATION ---
+# The list of BEIR datasets to download and merge.
+# (total ~500k docs).
+datasets:
+  - scifact
+  - nfcorpus
+  - trec-covid
+  - fiqa
+  - arguana
+  - scidocs
+  - webis-touche2020
