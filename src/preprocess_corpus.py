@@ -1,15 +1,8 @@
 import os
 import json
-import yaml
 from tqdm import tqdm
 from nltk.stem import SnowballStemmer
-
-CONFIG_PATH = "config.yaml"
-
-def load_config():
-    """Load configuration from config.yaml."""
-    with open(CONFIG_PATH, 'r') as f:
-        return yaml.safe_load(f)
+from utils import load_config
 
 def main():
     config = load_config()

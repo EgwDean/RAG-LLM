@@ -1,24 +1,10 @@
 import os
 import json
 import csv
-import yaml
 import gc
 from beir import util
 from beir.datasets.data_loader import GenericDataLoader
-
-CONFIG_PATH = "config.yaml"
-
-def load_config():
-    """Load configuration from config.yaml."""
-    if not os.path.exists(CONFIG_PATH):
-        raise FileNotFoundError(f"Configuration file not found at: {os.path.abspath(CONFIG_PATH)}")
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
-
-def ensure_dir(path):
-    """Create directory if it doesn't exist."""
-    if not os.path.exists(path):
-        os.makedirs(path)
+from utils import load_config, ensure_dir
 
 def initialize_output_files(corpus_path, queries_path, qrels_path):
     """Initialize output files and write qrels header."""

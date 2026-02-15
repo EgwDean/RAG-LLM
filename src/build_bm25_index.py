@@ -1,21 +1,9 @@
 import os
 import json
 import pickle
-import yaml
 from tqdm import tqdm
 from rank_bm25 import BM25Okapi
-
-CONFIG_PATH = "config.yaml"
-
-def load_config():
-    """Load configuration from config.yaml."""
-    with open(CONFIG_PATH, 'r') as f:
-        return yaml.safe_load(f)
-
-def ensure_dir(path):
-    """Create directory if it doesn't exist."""
-    if not os.path.exists(path):
-        os.makedirs(path)
+from utils import load_config, ensure_dir
 
 def main():
     config = load_config()
