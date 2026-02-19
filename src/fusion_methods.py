@@ -2,6 +2,15 @@ import numpy as np
 from collections import Counter
 from scipy.spatial.distance import jensenshannon
 
+__all__ = [
+    'sigmoid',
+    'get_query_distribution',
+    'compute_divergence_alpha',
+    'apply_rrf_fusion',
+    'apply_wrrf_fusion',
+    'get_sorted_docs'
+]
+
 def sigmoid(x, k=10, x0=0):
     """Standard sigmoid, shifted by x0 and scaled by k."""
     return 1 / (1 + np.exp(-k * (x - x0)))
@@ -33,12 +42,16 @@ def get_query_distribution(query_tokens, global_counts, total_tokens):
 
     return p_query, p_corpus
 
-def compute_divergence_alpha(query_tokens, freq_data, config, method="jsd", use_sigmoid=False):
+def compute_divergence_alpha(query_tokens, freq_data, config, method="jsd", use_sigmoid=False, normalize_01=False, div_stats=None):
     """Compute the dense-weight alpha from query–corpus divergence.
 
     High divergence means the query is specific — lean towards BM25
     (low alpha). Low divergence means the query is generic — lean
     towards dense retrieval (high alpha).
+    
+    Args:
+        normalize_01: If True, normalize divergence to [0,1] using min/max from div_stats
+        div_stats: Dict with 'min' and 'max' keys for normalization
     """
     p_q, p_c = get_query_distribution(
         query_tokens, freq_data['counts'], freq_data['total_tokens']
@@ -53,6 +66,14 @@ def compute_divergence_alpha(query_tokens, freq_data, config, method="jsd", use_
         div_score = np.sum(p_q * np.log(p_q / p_c))
     else:
         div_score = 0.5
+
+    # Normalize divergence to [0, 1] if requested
+    if normalize_01 and div_stats is not None:
+        div_min, div_max = div_stats['min'], div_stats['max']
+        if div_max > div_min:
+            div_score = (div_score - div_min) / (div_max - div_min)
+        else:
+            div_score = 0.5
 
     if use_sigmoid:
         params = config['benchmark']['sigmoid']

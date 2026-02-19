@@ -1,12 +1,6 @@
 # Dataset configuration
 datasets:
   - scifact
-  - nfcorpus
-  - trec-covid
-  - fiqa
-  - arguana
-  - scidocs
-  - webis-touche2020
 
 # Paths
 paths:
@@ -51,5 +45,5 @@ benchmark:
     k: 60
 
   sigmoid:
-    center: 0.15
+    center: 0.5
     slope: 10

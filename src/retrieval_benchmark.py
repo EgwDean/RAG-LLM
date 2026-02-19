@@ -8,7 +8,8 @@ from fusion_methods import (
     apply_rrf_fusion,
     apply_wrrf_fusion,
     compute_divergence_alpha,
-    get_sorted_docs
+    get_sorted_docs,
+    get_query_distribution
 )
 
 def calculate_ndcg_at_k(result_ids, qrels, k=10):
@@ -56,8 +57,36 @@ def main():
         ("Naive RRF", "rrf"),
         ("JSD (Linear)", "jsd_linear"),
         ("JSD (Sigmoid)", "jsd_sigmoid"),
+        ("JSD (0-1 Norm)", "jsd_normalized"),
         ("KLD (Sigmoid)", "kld_sigmoid"),
+        ("KLD (0-1 Norm)", "kld_normalized"),
     ]
+
+    # Pre-compute divergence statistics for normalized methods
+    div_stats = {"jsd": {"values": [], "min": 0, "max": 1}, 
+                 "kld": {"values": [], "min": 0, "max": 1}}
+    
+    print("Computing divergence statistics for normalization...")
+    for qid in query_ids:
+        p_q, p_c = get_query_distribution(
+            tokenized_queries[qid], 
+            freq_data['counts'], 
+            freq_data['total_tokens']
+        )
+        if p_q is not None:
+            from scipy.spatial.distance import jensenshannon
+            jsd_val = jensenshannon(p_q, p_c, base=2) ** 2
+            kld_val = np.sum(p_q * np.log(p_q / p_c))
+            div_stats["jsd"]["values"].append(jsd_val)
+            div_stats["kld"]["values"].append(kld_val)
+    
+    div_stats["jsd"]["min"] = float(np.min(div_stats["jsd"]["values"]))
+    div_stats["jsd"]["max"] = float(np.max(div_stats["jsd"]["values"]))
+    div_stats["kld"]["min"] = float(np.min(div_stats["kld"]["values"]))
+    div_stats["kld"]["max"] = float(np.max(div_stats["kld"]["values"]))
+    
+    print(f"  JSD range: [{div_stats['jsd']['min']:.4f}, {div_stats['jsd']['max']:.4f}]")
+    print(f"  KLD range: [{div_stats['kld']['min']:.4f}, {div_stats['kld']['max']:.4f}]")
 
     final_metrics = []
 
@@ -85,11 +114,13 @@ def main():
 
             else:
                 use_sig = "sigmoid" in mode
+                use_norm = "normalized" in mode
                 metric = "kld" if "kld" in mode else "jsd"
 
                 alpha = compute_divergence_alpha(
                     tokenized_queries[qid], freq_data, config,
-                    method=metric, use_sigmoid=use_sig
+                    method=metric, use_sigmoid=use_sig, 
+                    normalize_01=use_norm, div_stats=div_stats[metric] if use_norm else None
                 )
                 alpha_values.append(alpha)
 
