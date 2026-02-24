@@ -1,6 +1,6 @@
 datasets:
   #- scifact          # 300 queries  |   5 084 docs | 1.1 avg
-  #- nfcorpus       # 323 queries  |   3 633 docs | 38.2 avg
+  - nfcorpus       # 323 queries  |   3 633 docs | 38.2 avg
   #- arguana        # 1 406 queries |   8 674 docs | 1.0 avg
   #- webis-touche2020 # 49 queries  | 382 545 docs | 19.0 avg
   #- fiqa           # 648 queries   |  57 638 docs | 2.6 avg

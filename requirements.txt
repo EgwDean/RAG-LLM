@@ -30,3 +30,4 @@ matplotlib
 jupyter
 ipykernel
 ipywidgets
+nbconvert
