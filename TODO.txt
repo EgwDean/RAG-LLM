@@ -1,4 +1,0 @@
-Add all preprocessed BEIR datasets in the config but commented 
-and write as comments their stats next to them.
-
-Update the requirements.txt files adding all necessary packages/modules.

@@ -1,21 +1,18 @@
-# ──────────────────────────────────────────────────────
-# Dataset configuration
-# Add / remove dataset names below and re-run the notebook.
-# The pipeline will automatically detect changes and only
-# rebuild the steps that need updating.
-#
-# Available BEIR datasets:
-#   nfcorpus, scifact, trec-covid, arguana,
-#   fiqa, scidocs, webis-touche2020
-# ──────────────────────────────────────────────────────
 datasets:
-  #- arguana
-  #- nfcorpus
-  - scifact
-  #- trec-covid
-  #- fiqa
-  #- scidocs
-  #- webis-touche2020
+  #- scifact          # 300 queries  |   5 084 docs | 1.1 avg
+  #- nfcorpus       # 323 queries  |   3 633 docs | 38.2 avg
+  #- arguana        # 1 406 queries |   8 674 docs | 1.0 avg
+  #- webis-touche2020 # 49 queries  | 382 545 docs | 19.0 avg
+  #- fiqa           # 648 queries   |  57 638 docs | 2.6 avg
+  #- scidocs        # 1 000 queries |  25 657 docs | 4.9 avg
+  #- trec-covid     # 50 queries    | 171 332 docs | 493.5 avg
+  #- climate-fever  # 1 535 queries |   5.42M docs | 3.0 avg
+  #- nq             # 3 452 queries |   2.68M docs | 1.2 avg
+  #- hotpotqa       # 7 405 queries |   5.23M docs | 2.0 avg
+  #- fever          # 6 666 queries |   5.42M docs | 1.2 avg
+  #- quora          # 10 000 queries| 522 931 docs | 1.6 avg  (eval split: dev)
+  #- dbpedia-entity # 400 queries   |   4.63M docs | 38.2 avg (eval split: dev)
+  #- msmarco        # 6 980 queries |   8.84M docs | 1.1 avg  (eval split: dev)
 
 # Paths
 paths:
