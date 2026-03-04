@@ -75,9 +75,6 @@ source .venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
-
-# 4. Download the NLTK punkt tokenizer (first run only)
-python -c "import nltk; nltk.download('punkt')"
 ```
 
 ---
@@ -203,4 +200,4 @@ Estimates assume BAAI/bge-m3.  Using `all-MiniLM-L6-v2` uses roughly 3x less VRA
 
 ## License
 
-See LICENSE file (if present) or contact the repository owner.
+See LICENSE file.
