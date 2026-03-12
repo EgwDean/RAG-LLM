@@ -83,7 +83,8 @@ preprocessing:
 embeddings:
   model_name: "BAAI/bge-m3"
   # model_name: "sentence-transformers/all-MiniLM-L6-v2"
-  batch_size: 64   # 32 is safe for CPU + large models; increase to 64-128 on GPU
+  batch_size: 64   # lower to 8-16 for large models on GPU with long documents
+  # max_seq_length: 512   # truncate docs to this many tokens before encoding.
 
 # ------------------------------------------------------------
 # Dense search

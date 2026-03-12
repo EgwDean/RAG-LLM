@@ -378,19 +378,28 @@ def run_bm25_retrieval(bm25, doc_ids, queries, stemmer_lang, top_k):
 # 6. Dense embeddings
 # ============================================================
 
+# Module-level flag: once the GPU context becomes unrecoverable within
+# this process, all subsequent encoding stays on CPU.  Avoids hitting
+# the same corrupted CUDA state on every subsequent batch.
+_gpu_failed = False
+
+
 def _encode_with_oom_retry(model, texts, device, batch_size):
     """Encode *texts* on *device*, halving *batch_size* on CUDA OOM.
 
     If an unrecoverable CUDA error occurs (e.g. cudaErrorLaunchFailure
-    after repeated OOM events corrupt the context), the function falls
-    back to CPU for the remainder of the batch rather than crashing.
+    after repeated OOM events corrupt the context), the function sets a
+    module-level flag and falls back to CPU for all remaining encoding in
+    this process, rather than crashing or bouncing between devices.
 
     Returns a list of CPU tensors (one per successful sub-batch).
     """
+    global _gpu_failed
     results = []
     start = 0
     current_bs = batch_size
-    current_device = device
+    # If the GPU was already marked as failed, skip straight to CPU.
+    current_device = "cpu" if _gpu_failed else device
     while start < len(texts):
         end = min(start + current_bs, len(texts))
         sub_batch = texts[start:end]
@@ -434,8 +443,9 @@ def _encode_with_oom_retry(model, texts, device, batch_size):
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
+                _gpu_failed = True   # persist across all future batches
                 current_device = "cpu"
-                current_bs = batch_size  # CPU can handle the full batch size
+                current_bs = batch_size
             else:
                 raise
     return results
@@ -447,6 +457,15 @@ def build_corpus_embeddings(corpus_jsonl, model, batch_size, device):
     """
     all_ids, all_embs = [], []
     total = count_lines(corpus_jsonl)
+    # Print active encoding device and GPU memory so the user can confirm
+    # whether encoding is actually running on the GPU.
+    if _gpu_failed or device == "cpu":
+        print(f"  Encoding device : cpu")
+    elif torch.cuda.is_available():
+        used_gb  = torch.cuda.memory_allocated() / 1e9
+        total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"  Encoding device : cuda  |  "
+              f"VRAM {used_gb:.1f} / {total_gb:.1f} GB allocated")
     for batch_ids, batch_texts in tqdm(
         load_corpus_batch_generator(corpus_jsonl, batch_size),
         total=math.ceil(total / batch_size),
@@ -1102,7 +1121,13 @@ def main():
     start = time.time()
     model = SentenceTransformer(model_name, device=device)
     elapsed = time.time() - start
+    # Optionally truncate sequences to speed up encoding on long-document
+
+    max_seq = cfg["embeddings"].get("max_seq_length")
+    if max_seq is not None:
+        model.max_seq_length = int(max_seq)
     print(f"  Model loaded in {elapsed:.1f}s")
+    print(f"  Max sequence length     : {model.max_seq_length}")
     print(f"  CPU threads (torch)     : {torch.get_num_threads()}")
     print(f"  CPU inter-op threads    : {torch.get_num_interop_threads()}")
     print(f"  Workers (preprocessing) : {max(1, _N_CORES - 1)}\n")
