@@ -381,11 +381,16 @@ def run_bm25_retrieval(bm25, doc_ids, queries, stemmer_lang, top_k):
 def _encode_with_oom_retry(model, texts, device, batch_size):
     """Encode *texts* on *device*, halving *batch_size* on CUDA OOM.
 
+    If an unrecoverable CUDA error occurs (e.g. cudaErrorLaunchFailure
+    after repeated OOM events corrupt the context), the function falls
+    back to CPU for the remainder of the batch rather than crashing.
+
     Returns a list of CPU tensors (one per successful sub-batch).
     """
     results = []
     start = 0
     current_bs = batch_size
+    current_device = device
     while start < len(texts):
         end = min(start + current_bs, len(texts))
         sub_batch = texts[start:end]
@@ -394,19 +399,44 @@ def _encode_with_oom_retry(model, texts, device, batch_size):
                 sub_batch,
                 convert_to_tensor=True,
                 show_progress_bar=False,
-                device=device,
+                device=current_device,
             )
             results.append(embs.cpu())
             start = end
-            # Restore original batch size for the next chunk
-            current_bs = batch_size
+            # Restore original batch size after a successful encode
+            if current_device == device:
+                current_bs = batch_size
         except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
             current_bs = max(1, current_bs // 2)
-            if current_bs < batch_size:
-                print(f"\n  [OOM] Reduced sub-batch size to {current_bs}")
+            print(f"\n  [OOM] Reduced sub-batch size to {current_bs}")
             if current_bs == 1 and end - start == 1:
                 # Single item still OOMs — re-raise
+                raise
+        except Exception as exc:
+            # Catch unrecoverable CUDA errors (e.g. cudaErrorLaunchFailure)
+            # that arise when the GPU context is corrupted after heavy OOM.
+            # torch.AcceleratorError is the typed exception in recent PyTorch;
+            # older versions surface these as RuntimeError with "CUDA" in the
+            # message.
+            _AcceleratorError = getattr(torch, "AcceleratorError", None)
+            is_cuda_error = (
+                (_AcceleratorError is not None and isinstance(exc, _AcceleratorError))
+                or ("cuda" in str(exc).lower())
+            )
+            if is_cuda_error and current_device != "cpu":
+                print(f"\n  [CUDA ERROR] Unrecoverable GPU error — falling back to CPU.")
+                print(f"  ({type(exc).__name__}: {exc})")
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                current_device = "cpu"
+                current_bs = batch_size  # CPU can handle the full batch size
+            else:
                 raise
     return results
 
