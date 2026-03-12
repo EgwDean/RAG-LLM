@@ -378,6 +378,39 @@ def run_bm25_retrieval(bm25, doc_ids, queries, stemmer_lang, top_k):
 # 6. Dense embeddings
 # ============================================================
 
+def _encode_with_oom_retry(model, texts, device, batch_size):
+    """Encode *texts* on *device*, halving *batch_size* on CUDA OOM.
+
+    Returns a list of CPU tensors (one per successful sub-batch).
+    """
+    results = []
+    start = 0
+    current_bs = batch_size
+    while start < len(texts):
+        end = min(start + current_bs, len(texts))
+        sub_batch = texts[start:end]
+        try:
+            embs = model.encode(
+                sub_batch,
+                convert_to_tensor=True,
+                show_progress_bar=False,
+                device=device,
+            )
+            results.append(embs.cpu())
+            start = end
+            # Restore original batch size for the next chunk
+            current_bs = batch_size
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            current_bs = max(1, current_bs // 2)
+            if current_bs < batch_size:
+                print(f"\n  [OOM] Reduced sub-batch size to {current_bs}")
+            if current_bs == 1 and end - start == 1:
+                # Single item still OOMs — re-raise
+                raise
+    return results
+
+
 def build_corpus_embeddings(corpus_jsonl, model, batch_size, device):
     """Encode every document in *corpus_jsonl* and return a stacked
     tensor of embeddings plus the ordered list of doc IDs.
@@ -390,14 +423,9 @@ def build_corpus_embeddings(corpus_jsonl, model, batch_size, device):
         desc="  Encoding corpus",
         dynamic_ncols=True,
     ):
-        embs = model.encode(
-            batch_texts,
-            convert_to_tensor=True,
-            show_progress_bar=False,
-            device=device,
-        )
+        embs_list = _encode_with_oom_retry(model, batch_texts, device, batch_size)
         all_ids.extend(batch_ids)
-        all_embs.append(embs.cpu())
+        all_embs.extend(embs_list)
     return torch.cat(all_embs, dim=0), all_ids
 
 
@@ -413,10 +441,8 @@ def build_dense_query_vectors(queries, model, batch_size, device):
     for i in tqdm(range(0, len(qtexts), batch_size), desc="  Encoding queries",
                   dynamic_ncols=True):
         batch = qtexts[i : i + batch_size]
-        emb = model.encode(
-            batch, convert_to_tensor=True, show_progress_bar=False, device=device
-        )
-        all_embs.append(emb.cpu())
+        embs_list = _encode_with_oom_retry(model, batch, device, batch_size)
+        all_embs.extend(embs_list)
     return torch.cat(all_embs, dim=0), qids
 
 
