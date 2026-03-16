@@ -43,10 +43,10 @@ datasets:
   - arguana
   - fiqa
   - scidocs
-  - webis-touche2020
-  - trec-covid
+  #- webis-touche2020
+  #- trec-covid
   #- nq
-  - quora
+  #- quora
   #- climate-fever
   #- hotpotqa
   #- fever
@@ -73,8 +73,8 @@ preprocessing:
 # Embedding model
 # ------------------------------------------------------------
 embeddings:
-  # model_name: "BAAI/bge-m3"
-  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  model_name: "BAAI/bge-m3"
+  #model_name: "sentence-transformers/all-MiniLM-L6-v2"
   batch_size: 64   # lower to 8-16 for large models on GPU with long documents
   # max_seq_length: 512   # truncate docs to this many tokens before encoding.
 
