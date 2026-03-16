@@ -466,9 +466,9 @@ def evaluate_dataset(dataset_name, cfg, device):
     dense_cfg = cfg["dense_search"]
     dynamic_cfg = cfg["benchmark"]["dynamic_wrrf"]
 
-    max_df_values = dynamic_cfg.get("max_df_values", [0.5, 0.8])
-    k_values = dynamic_cfg.get("k_values", [1.0, 2.0, 3.0])
-    center_values = dynamic_cfg.get("center_values", [-0.5, 0.0, 0.5])
+    max_df_values = dynamic_cfg["max_df_values"]
+    k_values = dynamic_cfg["k_values"]
+    center_values = dynamic_cfg["center_values"]
 
     short_model = model_short_name(cfg["embeddings"]["model_name"])
     processed_root = get_config_path(cfg, "processed_folder", "data/processed_data")

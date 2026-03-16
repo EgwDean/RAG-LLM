@@ -38,15 +38,15 @@
 #   msmarco           6 980 queries |    8.84M docs |  1.1 avg  (split: dev)
 # -----------------------------------------------------------------
 datasets:
-  #- scifact
+  - scifact
   - nfcorpus
-  #- arguana
-  #- fiqa
-  #- scidocs
-  #- webis-touche2020
-  #- trec-covid
+  - arguana
+  - fiqa
+  - scidocs
+  - webis-touche2020
+  - trec-covid
   #- nq
-  #- quora
+  - quora
   #- climate-fever
   #- hotpotqa
   #- fever
@@ -95,5 +95,5 @@ benchmark:
     k: 60               # RRF damping constant (Cormack et al. 2009)
   dynamic_wrrf:
     max_df_values: [0.5, 0.8]
-    k_values: [1.0, 2.0, 3.0]
-    center_values: [-0.5, 0.0, 0.5]
+    k_values: [-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]
+    center_values: [-1.0, -0.5, 0.0, 0.5, 1.0]
