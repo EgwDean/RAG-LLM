@@ -16,12 +16,17 @@ Artifacts built here:
 """
 
 import argparse
+import math
 import json
 import os
 import sys
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+
 import torch
 from nltk.stem.snowball import SnowballStemmer
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 # Make sure project root is importable regardless of launch location.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,7 +41,6 @@ from src.utils import (
     ensure_dir,
     file_exists,
     save_pickle,
-    load_pickle,
     write_corpus_jsonl,
     write_queries_jsonl,
     write_qrels_tsv,
@@ -45,13 +49,177 @@ from src.utils import (
     load_beir_dataset,
     model_short_name,
     stem_and_tokenize,
+    count_lines,
+    load_corpus_batch_generator,
+    stem_batch_worker,
+    _init_worker,
 )
-from src.pipeline import (
-    preprocess_corpus,
-    build_bm25_and_word_freq_index,
-    build_corpus_embeddings,
-    build_dense_query_vectors,
-)
+
+
+# Use most CPU cores for local preprocessing and encoding support routines.
+_N_CORES = os.cpu_count() or 4
+torch.set_num_threads(_N_CORES)
+torch.set_num_interop_threads(1)
+
+# Module-level flag used by the encoding OOM fallback helper.
+_gpu_failed = False
+
+
+def preprocess_corpus(corpus_jsonl, output_jsonl, stemmer_lang, batch_size=512):
+    """Stem-tokenize the corpus JSONL using multiprocessing and cache to disk."""
+    ensure_dir(os.path.dirname(output_jsonl))
+    n_workers = max(1, _N_CORES - 1)
+    max_pending = n_workers * 3
+    total_batches = math.ceil(count_lines(corpus_jsonl) / batch_size)
+
+    with open(output_jsonl, "w", encoding="utf-8") as out:
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_init_worker,
+            initargs=(stemmer_lang,),
+        ) as pool:
+            pending = deque()
+            pbar = tqdm(
+                total=total_batches,
+                desc="  Preprocessing corpus",
+                dynamic_ncols=True,
+            )
+
+            for batch_ids, batch_texts in load_corpus_batch_generator(corpus_jsonl, batch_size):
+                pending.append(pool.submit(stem_batch_worker, (batch_ids, batch_texts)))
+                while len(pending) >= max_pending:
+                    for line in pending.popleft().result():
+                        out.write(line + "\n")
+                    pbar.update(1)
+
+            while pending:
+                for line in pending.popleft().result():
+                    out.write(line + "\n")
+                pbar.update(1)
+
+            pbar.close()
+
+
+def build_bm25_and_word_freq_index(tokenized_corpus_jsonl):
+    """Build BM25 index plus corpus-wide token frequency index in one pass."""
+    from rank_bm25 import BM25Okapi
+
+    doc_ids = []
+    tokenized_docs = []
+    global_counts = {}
+    total_tokens = 0
+
+    num_lines = count_lines(tokenized_corpus_jsonl)
+    with open(tokenized_corpus_jsonl, "r", encoding="utf-8") as f:
+        for line in tqdm(f, total=num_lines, desc="  Loading tokenized corpus", dynamic_ncols=True):
+            d = json.loads(line)
+            doc_ids.append(d["_id"])
+            tokens = d["tokens"]
+            tokenized_docs.append(tokens)
+            for t in tokens:
+                global_counts[t] = global_counts.get(t, 0) + 1
+            total_tokens += len(tokens)
+
+    print(f"  Building BM25 index over {len(doc_ids):,} documents ...")
+    bm25 = BM25Okapi(tokenized_docs)
+    print(
+        f"  Vocabulary size: {len(global_counts):,} unique tokens, "
+        f"{total_tokens:,} total occurrences."
+    )
+    return bm25, doc_ids, global_counts, total_tokens
+
+
+def _encode_with_oom_retry(model, texts, device, batch_size):
+    """Encode texts and fallback to smaller batches or CPU on CUDA errors."""
+    global _gpu_failed
+
+    results = []
+    start = 0
+    current_bs = batch_size
+    current_device = "cpu" if _gpu_failed else device
+
+    while start < len(texts):
+        end = min(start + current_bs, len(texts))
+        sub_batch = texts[start:end]
+        try:
+            embs = model.encode(
+                sub_batch,
+                convert_to_tensor=True,
+                show_progress_bar=False,
+                device=current_device,
+            )
+            results.append(embs.cpu())
+            start = end
+            if current_device == device:
+                current_bs = batch_size
+        except torch.cuda.OutOfMemoryError:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            current_bs = max(1, current_bs // 2)
+            print(f"\n  [OOM] Reduced sub-batch size to {current_bs}")
+            if current_bs == 1 and end - start == 1:
+                raise
+        except Exception as exc:
+            _AcceleratorError = getattr(torch, "AcceleratorError", None)
+            is_cuda_error = (
+                (_AcceleratorError is not None and isinstance(exc, _AcceleratorError))
+                or ("cuda" in str(exc).lower())
+            )
+            if is_cuda_error and current_device != "cpu":
+                print("\n  [CUDA ERROR] Unrecoverable GPU error -- falling back to CPU.")
+                print(f"  ({type(exc).__name__}: {exc})")
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                _gpu_failed = True
+                current_device = "cpu"
+                current_bs = batch_size
+            else:
+                raise
+
+    return results
+
+
+def build_corpus_embeddings(corpus_jsonl, model, batch_size, device):
+    """Encode all corpus documents and return embeddings tensor and doc ids."""
+    all_ids, all_embs = [], []
+    total = count_lines(corpus_jsonl)
+
+    if _gpu_failed or device == "cpu":
+        print("  Encoding device : cpu")
+    elif torch.cuda.is_available():
+        used_gb = torch.cuda.memory_allocated() / 1e9
+        total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"  Encoding device : cuda  |  VRAM {used_gb:.1f} / {total_gb:.1f} GB allocated")
+
+    for batch_ids, batch_texts in tqdm(
+        load_corpus_batch_generator(corpus_jsonl, batch_size),
+        total=math.ceil(total / batch_size),
+        desc="  Encoding corpus",
+        dynamic_ncols=True,
+    ):
+        embs_list = _encode_with_oom_retry(model, batch_texts, device, batch_size)
+        all_ids.extend(batch_ids)
+        all_embs.extend(embs_list)
+
+    return torch.cat(all_embs, dim=0), all_ids
+
+
+def build_dense_query_vectors(queries, model, batch_size, device):
+    """Encode queries and return embeddings tensor and query ids."""
+    qids = list(queries.keys())
+    qtexts = [queries[q] for q in qids]
+    all_embs = []
+
+    for i in tqdm(range(0, len(qtexts), batch_size), desc="  Encoding queries", dynamic_ncols=True):
+        batch = qtexts[i: i + batch_size]
+        embs_list = _encode_with_oom_retry(model, batch, device, batch_size)
+        all_embs.extend(embs_list)
+
+    return torch.cat(all_embs, dim=0), qids
 
 
 def preprocess_queries(queries_jsonl, tokenized_queries_jsonl, query_tokens_pkl, stemmer_lang):

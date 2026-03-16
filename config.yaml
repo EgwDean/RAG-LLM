@@ -96,3 +96,4 @@ benchmark:
   dynamic_wrrf:
     max_df_values: [0.5, 0.8]
     k_values: [1.0, 2.0, 3.0]
+    center_values: [-0.5, 0.0, 0.5]

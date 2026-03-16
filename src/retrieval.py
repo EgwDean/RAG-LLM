@@ -35,6 +35,8 @@ import numpy as np
 import torch
 from nltk.corpus import stopwords
 from nltk.stem.snowball import SnowballStemmer
+from sentence_transformers import util as st_util
+from tqdm import tqdm
 
 # Ensure project root is on sys.path and cwd is project root.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,26 +55,108 @@ from src.utils import (
     load_qrels,
     model_short_name,
     stem_and_tokenize,
-    count_lines,
     get_config_path,
     ensure_dir,
 )
-from src.pipeline import (
-    run_bm25_retrieval,
-    run_dense_retrieval,
-    calculate_ndcg_at_k,
-    apply_rrf_fusion,
-)
 
 
-def sigmoid(x, slope):
-    """Sigmoid routing function for standardized metric values."""
-    return 1.0 / (1.0 + math.exp(-slope * x))
+def sigmoid(x, slope, center=0.0):
+    """Sigmoid routing with configurable center bias."""
+    return 1.0 / (1.0 + math.exp(-slope * (x - center)))
 
 
 def _missing_paths(paths):
     """Return the subset of paths that do not exist."""
     return [p for p in paths if not file_exists(p)]
+
+
+def get_sorted_docs(scores_dict, top_k):
+    """Sort score dict by value descending and return top-k pairs."""
+    return sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)[:top_k]
+
+
+def calculate_ndcg_at_k(fused_results, qrels, top_k):
+    """Compute average NDCG@k across all queries in qrels."""
+    ndcg_scores = []
+    for qid, rels in qrels.items():
+        if qid not in fused_results:
+            ndcg_scores.append(0.0)
+            continue
+
+        ranked = get_sorted_docs(fused_results[qid], top_k)
+        dcg = 0.0
+        for rank, (doc_id, _) in enumerate(ranked, start=1):
+            rel = rels.get(doc_id, 0)
+            dcg += rel / math.log2(rank + 1)
+
+        ideal_rels = sorted(rels.values(), reverse=True)[:top_k]
+        idcg = sum(r / math.log2(i + 2) for i, r in enumerate(ideal_rels))
+        ndcg_scores.append(dcg / idcg if idcg > 0 else 0.0)
+
+    return float(np.mean(ndcg_scores)) if ndcg_scores else 0.0
+
+
+def apply_rrf_fusion(bm25_results, dense_results, k=60):
+    """Reciprocal Rank Fusion baseline."""
+    fused = {}
+    all_qids = set(bm25_results.keys()) | set(dense_results.keys())
+    for qid in all_qids:
+        doc_scores = {}
+        for rank, (doc_id, _) in enumerate(bm25_results.get(qid, []), start=1):
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+        for rank, (doc_id, _) in enumerate(dense_results.get(qid, []), start=1):
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+        fused[qid] = doc_scores
+    return fused
+
+
+def run_bm25_retrieval(bm25, doc_ids, queries, stemmer_lang, top_k):
+    """Run BM25 retrieval and return {query_id: [(doc_id, score), ...]}."""
+    stemmer = SnowballStemmer(stemmer_lang)
+    results = {}
+    for qid, qtext in tqdm(queries.items(), desc="  BM25 retrieval", dynamic_ncols=True):
+        tokens = stem_and_tokenize(qtext, stemmer)
+        scores = bm25.get_scores(tokens)
+        k = min(top_k, len(scores))
+        top_idx = np.argpartition(scores, -k)[-k:]
+        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
+        results[qid] = [(doc_ids[i], float(scores[i])) for i in top_idx]
+    return results
+
+
+def run_dense_retrieval(
+    query_vectors,
+    query_ids,
+    corpus_vectors,
+    corpus_ids,
+    top_k,
+    corpus_chunk_size,
+    device,
+    query_chunk_size=100,
+):
+    """Run chunked cosine-similarity dense retrieval."""
+    results = {}
+    n_queries = len(query_ids)
+    for q_start in tqdm(
+        range(0, n_queries, query_chunk_size),
+        desc="  Dense retrieval",
+        dynamic_ncols=True,
+    ):
+        q_end = min(q_start + query_chunk_size, n_queries)
+        q_batch = query_vectors[q_start:q_end].to(device)
+        hits = st_util.semantic_search(
+            q_batch,
+            corpus_vectors,
+            top_k=top_k,
+            corpus_chunk_size=corpus_chunk_size,
+        )
+        for idx, hit_list in enumerate(hits):
+            qid = query_ids[q_start + idx]
+            results[qid] = [
+                (corpus_ids[h["corpus_id"]], float(h["score"]))
+                for h in hit_list
+            ]
+    return results
 
 
 def ensure_english_stopwords():
@@ -103,41 +187,37 @@ def ensure_doc_freq_index(tokenized_corpus_jsonl, doc_freq_pkl):
     return doc_freq, total_docs
 
 
-def minmax_normalize_results(results_by_query):
-    """Min-max normalize retrieval scores per query and per retriever."""
-    normed = {}
-    for qid, pairs in results_by_query.items():
-        if not pairs:
-            normed[qid] = {}
-            continue
-        scores = np.array([score for _, score in pairs], dtype=np.float64)
-        lo = float(np.min(scores))
-        hi = float(np.max(scores))
-        spread = hi - lo
-        if spread <= 0:
-            normed[qid] = {doc_id: 0.0 for doc_id, _ in pairs}
-        else:
-            normed[qid] = {
-                doc_id: (float(score) - lo) / spread
-                for doc_id, score in pairs
-            }
-    return normed
+def build_dynamic_wrrf(bm25_results, dense_results, alpha_map, rrf_k=60):
+    """Fuse retrievers with dynamic weighted Reciprocal Rank Fusion.
 
+    For each query:
+      score = alpha * (1 / (rrf_k + bm_rank))
+            + (1 - alpha) * (1 / (rrf_k + dense_rank))
 
-def build_weighted_score_fusion(norm_bm25, norm_dense, alpha_map):
-    """Fuse normalized BM25 and Dense scores with query-specific alpha."""
+    Documents not present in one retriever receive default rank 1000 for that
+    retriever.
+    """
     fused = {}
-    all_qids = set(norm_bm25.keys()) | set(norm_dense.keys())
+    all_qids = set(bm25_results.keys()) | set(dense_results.keys())
     for qid in all_qids:
         alpha = alpha_map.get(qid, 0.5)
-        bm_map = norm_bm25.get(qid, {})
-        de_map = norm_dense.get(qid, {})
-        docs = set(bm_map.keys()) | set(de_map.keys())
-        fused[qid] = {
-            doc_id: alpha * bm_map.get(doc_id, 0.0)
-            + (1.0 - alpha) * de_map.get(doc_id, 0.0)
-            for doc_id in docs
-        }
+
+        bm_pairs = sorted(bm25_results.get(qid, []), key=lambda x: x[1], reverse=True)
+        de_pairs = sorted(dense_results.get(qid, []), key=lambda x: x[1], reverse=True)
+
+        bm_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(bm_pairs, start=1)}
+        de_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(de_pairs, start=1)}
+
+        docs = set(bm_ranks.keys()) | set(de_ranks.keys())
+        q_scores = {}
+        for doc_id in docs:
+            bm_rank = bm_ranks.get(doc_id, 1000)
+            de_rank = de_ranks.get(doc_id, 1000)
+            q_scores[doc_id] = (
+                alpha * (1.0 / (rrf_k + bm_rank))
+                + (1.0 - alpha) * (1.0 / (rrf_k + de_rank))
+            )
+        fused[qid] = q_scores
     return fused
 
 
@@ -204,8 +284,8 @@ def compute_query_metrics(clean_tokens, global_counts, total_corpus_tokens):
     return {"kld": kld, "jsd": jsd, "ce": ce_avg}
 
 
-def build_alpha_map(metric_values, slope):
-    """Convert raw metric values to alpha via z-score then sigmoid."""
+def build_alpha_map(metric_values, slope, center):
+    """Convert raw metric values to alpha via z-score then centered sigmoid."""
     valid = [v for v in metric_values.values() if v is not None]
     if not valid:
         return {qid: 0.0 for qid in metric_values}
@@ -221,7 +301,7 @@ def build_alpha_map(metric_values, slope):
             alpha_map[qid] = 0.0
         else:
             z = (value - mean_val) / std_val
-            alpha_map[qid] = sigmoid(z, slope)
+            alpha_map[qid] = sigmoid(z, slope, center=center)
     return alpha_map
 
 
@@ -234,11 +314,13 @@ def run_dynamic_grid_search(
     total_docs,
     global_counts,
     total_corpus_tokens,
-    norm_bm25,
-    norm_dense,
+    bm25_results,
+    dense_results,
+    rrf_k,
     ndcg_k,
     max_df_values,
     k_values,
+    center_values,
 ):
     """Run one unified grid search for JSD, KLD, and CE.
 
@@ -270,22 +352,47 @@ def run_dynamic_grid_search(
         metric_cache[max_df] = metric_by_key
 
     best_by_metric = {
-        "jsd": {"metric": "JSD", "best_max_df": None, "best_k": None, "best_ndcg": -1.0},
-        "kld": {"metric": "KLD", "best_max_df": None, "best_k": None, "best_ndcg": -1.0},
-        "ce": {"metric": "CE", "best_max_df": None, "best_k": None, "best_ndcg": -1.0},
+        "jsd": {
+            "metric": "JSD",
+            "best_max_df": None,
+            "best_k": None,
+            "best_center": None,
+            "best_ndcg": -1.0,
+        },
+        "kld": {
+            "metric": "KLD",
+            "best_max_df": None,
+            "best_k": None,
+            "best_center": None,
+            "best_ndcg": -1.0,
+        },
+        "ce": {
+            "metric": "CE",
+            "best_max_df": None,
+            "best_k": None,
+            "best_center": None,
+            "best_ndcg": -1.0,
+        },
     }
 
     for max_df in max_df_values:
         metric_by_key = metric_cache[max_df]
         for slope in k_values:
-            for metric_key in metric_keys:
-                alpha_map = build_alpha_map(metric_by_key[metric_key], slope)
-                fused = build_weighted_score_fusion(norm_bm25, norm_dense, alpha_map)
-                ndcg = calculate_ndcg_at_k(fused, qrels, ndcg_k)
-                if ndcg > best_by_metric[metric_key]["best_ndcg"]:
-                    best_by_metric[metric_key]["best_ndcg"] = ndcg
-                    best_by_metric[metric_key]["best_max_df"] = max_df
-                    best_by_metric[metric_key]["best_k"] = slope
+            for center in center_values:
+                for metric_key in metric_keys:
+                    alpha_map = build_alpha_map(metric_by_key[metric_key], slope, center)
+                    fused = build_dynamic_wrrf(
+                        bm25_results,
+                        dense_results,
+                        alpha_map,
+                        rrf_k=rrf_k,
+                    )
+                    ndcg = calculate_ndcg_at_k(fused, qrels, ndcg_k)
+                    if ndcg > best_by_metric[metric_key]["best_ndcg"]:
+                        best_by_metric[metric_key]["best_ndcg"] = ndcg
+                        best_by_metric[metric_key]["best_max_df"] = max_df
+                        best_by_metric[metric_key]["best_k"] = slope
+                        best_by_metric[metric_key]["best_center"] = center
 
     return best_by_metric
 
@@ -311,7 +418,7 @@ def save_params_csv(param_rows, output_path):
     """Write best dynamic parameters per dataset and metric."""
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Dataset", "Metric", "Best max_df", "Best k", "Best NDCG@10"])
+        writer.writerow(["Dataset", "Metric", "Best max_df", "Best k", "Best center", "Best NDCG@10"])
         for row in param_rows:
             writer.writerow(
                 [
@@ -319,6 +426,7 @@ def save_params_csv(param_rows, output_path):
                     row["metric"],
                     row["best_max_df"],
                     row["best_k"],
+                    row["best_center"],
                     f"{row['best_ndcg']:.4f}",
                 ]
             )
@@ -360,6 +468,7 @@ def evaluate_dataset(dataset_name, cfg, device):
 
     max_df_values = dynamic_cfg.get("max_df_values", [0.5, 0.8])
     k_values = dynamic_cfg.get("k_values", [1.0, 2.0, 3.0])
+    center_values = dynamic_cfg.get("center_values", [-0.5, 0.0, 0.5])
 
     short_model = model_short_name(cfg["embeddings"]["model_name"])
     processed_root = get_config_path(cfg, "processed_folder", "data/processed_data")
@@ -457,9 +566,7 @@ def evaluate_dataset(dataset_name, cfg, device):
     dense_ndcg = calculate_ndcg_at_k(dense_only, qrels, ndcg_k)
     rrf_ndcg = calculate_ndcg_at_k(rrf_scores, qrels, ndcg_k)
 
-    print("[4/5] Building normalized score maps ...")
-    norm_bm25 = minmax_normalize_results(bm25_results)
-    norm_dense = minmax_normalize_results(dense_results)
+    print("[4/5] Preparing dynamic routing inputs ...")
 
     print("[5/5] Grid search for dynamic methods ...")
     stemmer = SnowballStemmer(stemmer_lang)
@@ -474,11 +581,13 @@ def evaluate_dataset(dataset_name, cfg, device):
         total_docs,
         global_counts,
         total_corpus_tokens,
-        norm_bm25,
-        norm_dense,
+        bm25_results,
+        dense_results,
+        rrf_k,
         ndcg_k,
         max_df_values,
         k_values,
+        center_values,
     )
     best_jsd = best_dynamic["jsd"]
     best_kld = best_dynamic["kld"]
@@ -487,9 +596,18 @@ def evaluate_dataset(dataset_name, cfg, device):
     print(f"  BM25 Only    : {bm25_ndcg:.4f}")
     print(f"  Dense Only   : {dense_ndcg:.4f}")
     print(f"  RRF          : {rrf_ndcg:.4f}")
-    print(f"  Dynamic JSD  : {best_jsd['best_ndcg']:.4f}  (max_df={best_jsd['best_max_df']}, k={best_jsd['best_k']})")
-    print(f"  Dynamic KLD  : {best_kld['best_ndcg']:.4f}  (max_df={best_kld['best_max_df']}, k={best_kld['best_k']})")
-    print(f"  Dynamic CE   : {best_ce['best_ndcg']:.4f}  (max_df={best_ce['best_max_df']}, k={best_ce['best_k']})")
+    print(
+        f"  Dynamic JSD  : {best_jsd['best_ndcg']:.4f}  "
+        f"(max_df={best_jsd['best_max_df']}, k={best_jsd['best_k']}, center={best_jsd['best_center']})"
+    )
+    print(
+        f"  Dynamic KLD  : {best_kld['best_ndcg']:.4f}  "
+        f"(max_df={best_kld['best_max_df']}, k={best_kld['best_k']}, center={best_kld['best_center']})"
+    )
+    print(
+        f"  Dynamic CE   : {best_ce['best_ndcg']:.4f}  "
+        f"(max_df={best_ce['best_max_df']}, k={best_ce['best_k']}, center={best_ce['best_center']})"
+    )
 
     summary_row = {
         "dataset": dataset_name,
@@ -509,6 +627,7 @@ def evaluate_dataset(dataset_name, cfg, device):
                 "metric": best["metric"],
                 "best_max_df": best["best_max_df"],
                 "best_k": best["best_k"],
+                "best_center": best["best_center"],
                 "best_ndcg": best["best_ndcg"],
             }
         )
