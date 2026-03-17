@@ -28,11 +28,19 @@ REQUIRED_COLUMNS = {
     "Best center",
 }
 
-METRIC_ORDER = ("JSD", "KLD", "CE")
+METRIC_ORDER = ("JSD", "KLD", "CE", "RANDOM")
 METRIC_COLORS = {
     "JSD": "#1f77b4",  # blue
     "KLD": "#ff7f0e",  # orange
     "CE": "#2ca02c",   # green
+    "RANDOM": "#d62728",  # red
+}
+
+METRIC_STYLES = {
+    "JSD": {"linestyle": "-", "linewidth": 3.0, "alpha": 0.7},
+    "KLD": {"linestyle": "--", "linewidth": 2.5, "alpha": 0.8},
+    "CE": {"linestyle": ":", "linewidth": 2.5, "alpha": 0.9},
+    "RANDOM": {"linestyle": "-.", "linewidth": 2.0, "alpha": 1.0},
 }
 
 
@@ -111,11 +119,14 @@ def build_figure(by_dataset, output_path):
             k = metric_params[metric]["k"]
             center = metric_params[metric]["center"]
             alpha_values = centered_sigmoid(z_values, k, center)
+            style = METRIC_STYLES[metric]
             ax.plot(
                 z_values,
                 alpha_values,
                 color=METRIC_COLORS[metric],
-                linewidth=2.0,
+                linestyle=style["linestyle"],
+                linewidth=style["linewidth"],
+                alpha=style["alpha"],
                 label=f"{metric} (k={k:g}, c={center:g})",
             )
 
@@ -136,7 +147,15 @@ def build_figure(by_dataset, output_path):
 
     # Single master legend for the entire figure
     legend_handles = [
-        plt.Line2D([0], [0], color=METRIC_COLORS[m], linewidth=2.0, label=m)
+        plt.Line2D(
+            [0],
+            [0],
+            color=METRIC_COLORS[m],
+            linestyle=METRIC_STYLES[m]["linestyle"],
+            linewidth=METRIC_STYLES[m]["linewidth"],
+            alpha=METRIC_STYLES[m]["alpha"],
+            label=m,
+        )
         for m in METRIC_ORDER
     ]
     fig.legend(legend_handles, [m for m in METRIC_ORDER], loc="upper center", ncol=3, frameon=False)

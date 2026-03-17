@@ -25,6 +25,7 @@ import csv
 import json
 import math
 import os
+import random
 import sys
 import time
 
@@ -281,7 +282,7 @@ def compute_query_metrics(clean_tokens, global_counts, total_corpus_tokens):
         total_ce += -math.log2(token_pc)
     ce_avg = float(total_ce / n_query)
 
-    return {"kld": kld, "jsd": jsd, "ce": ce_avg}
+    return {"kld": kld, "jsd": jsd, "ce": ce_avg, "random": random.random()}
 
 
 def build_alpha_map(metric_values, slope, center):
@@ -322,13 +323,13 @@ def run_dynamic_grid_search(
     k_values,
     center_values,
 ):
-    """Run one unified grid search for JSD, KLD, and CE.
+    """Run one unified grid search for JSD, KLD, CE, and Random.
 
     For each max_df value, query cleaning and metric computation are done
     exactly once and then reused for all metric/k combinations.
     """
     metric_cache = {}
-    metric_keys = ("jsd", "kld", "ce")
+    metric_keys = ("jsd", "kld", "ce", "random")
 
     for max_df in max_df_values:
         metric_by_key = {k: {} for k in metric_keys}
@@ -376,6 +377,14 @@ def run_dynamic_grid_search(
             "best_center": None,
             "best_ndcg": -1.0,
         },
+        "random": {
+            "metric": "RANDOM",
+            "best_max_df": None,
+            "best_rrf_k": None,
+            "best_k": None,
+            "best_center": None,
+            "best_ndcg": -1.0,
+        },
     }
 
     for max_df in max_df_values:
@@ -411,6 +420,7 @@ def save_summary_csv(summary_rows, output_path, ndcg_k):
         "Dynamic JSD",
         "Dynamic KLD",
         "Dynamic CE",
+        "Dynamic Random",
     ]
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -449,11 +459,19 @@ def save_params_csv(param_rows, output_path):
 def save_summary_chart(summary_rows, output_path):
     """Render grouped bars: methods on x-axis, one group per dataset."""
     datasets = [row["dataset"] for row in summary_rows]
-    methods = ["BM25 Only", "Dense Only", "RRF", "Dynamic JSD", "Dynamic KLD", "Dynamic CE"]
+    methods = [
+        "BM25 Only",
+        "Dense Only",
+        "RRF",
+        "Dynamic JSD",
+        "Dynamic KLD",
+        "Dynamic CE",
+        "Dynamic Random",
+    ]
     values = {m: [row[m] for row in summary_rows] for m in methods}
 
     x = np.arange(len(datasets), dtype=np.float64)
-    width = 0.13
+    width = 0.11
 
     fig, ax = plt.subplots(figsize=(12, 6))
     for idx, method in enumerate(methods):
@@ -607,6 +625,7 @@ def evaluate_dataset(dataset_name, cfg, device):
     best_jsd = best_dynamic["jsd"]
     best_kld = best_dynamic["kld"]
     best_ce = best_dynamic["ce"]
+    best_random = best_dynamic["random"]
 
     print(f"  BM25 Only    : {bm25_ndcg:.4f}")
     print(f"  Dense Only   : {dense_ndcg:.4f}")
@@ -626,6 +645,11 @@ def evaluate_dataset(dataset_name, cfg, device):
         f"(max_df={best_ce['best_max_df']}, rrf_k={best_ce['best_rrf_k']}, "
         f"k={best_ce['best_k']}, center={best_ce['best_center']})"
     )
+    print(
+        f"  Dynamic Random: {best_random['best_ndcg']:.4f}  "
+        f"(max_df={best_random['best_max_df']}, rrf_k={best_random['best_rrf_k']}, "
+        f"k={best_random['best_k']}, center={best_random['best_center']})"
+    )
 
     summary_row = {
         "dataset": dataset_name,
@@ -635,10 +659,11 @@ def evaluate_dataset(dataset_name, cfg, device):
         "Dynamic JSD": best_jsd["best_ndcg"],
         "Dynamic KLD": best_kld["best_ndcg"],
         "Dynamic CE": best_ce["best_ndcg"],
+        "Dynamic Random": best_random["best_ndcg"],
     }
 
     param_rows = []
-    for best in [best_jsd, best_kld, best_ce]:
+    for best in [best_jsd, best_kld, best_ce, best_random]:
         param_rows.append(
             {
                 "dataset": dataset_name,
