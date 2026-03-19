@@ -15,10 +15,6 @@ import csv
 import json
 import pickle
 import yaml
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 
 # ============================================================
@@ -50,30 +46,6 @@ def get_config_path(cfg, key, default_value):
     """Read a path key from cfg['paths'] with a fallback default."""
     paths_cfg = cfg.get("paths", {}) or {}
     return paths_cfg.get(key, default_value)
-
-
-def get_processing_artifact_filenames():
-    """Return filenames considered preprocessing/cache artifacts.
-
-    These artifacts belong under processed_data rather than results.
-    """
-    return [
-        "corpus.jsonl",
-        "queries.jsonl",
-        "qrels.tsv",
-        "tokenized_corpus.jsonl",
-        "bm25_index.pkl",
-        "bm25_doc_ids.pkl",
-        "word_freq_index.pkl",
-        "corpus_embeddings.pt",
-        "corpus_ids.pkl",
-        "bm25_results.pkl",
-        "query_vectors.pt",
-        "query_ids.pkl",
-        "dense_results.pkl",
-        "tokenized_queries.jsonl",
-        "query_tokens.pkl",
-    ]
 
 
 # ============================================================
@@ -382,69 +354,3 @@ def stem_batch_worker(args):
         tokens = [_worker_stemmer.stem(w) for w in text.lower().split()]
         results.append(json.dumps({"_id": doc_id, "tokens": tokens}))
     return results
-
-
-# ============================================================
-# Results output
-# ============================================================
-
-def save_results_csv(scores, output_path):
-    """Write benchmark results as a CSV file.
-
-    *scores* is a list of ``(method_name, ndcg_score)`` tuples.
-    Any existing file at *output_path* is overwritten.
-    """
-    ensure_dir(os.path.dirname(output_path))
-    with open(output_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Method", "NDCG@10"])
-        for method, ndcg in scores:
-            writer.writerow([method, f"{ndcg:.4f}"])
-
-
-def save_results_chart(scores, output_path, dataset_label, model_label):
-    """Draw a horizontal bar chart of NDCG@10 scores and save as PNG."""
-    ensure_dir(os.path.dirname(output_path))
-    methods = [m for m, _ in scores]
-    values = [v for _, v in scores]
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    y_pos = np.arange(len(methods))
-    bars = ax.barh(y_pos, values, color="#4a90d9")
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(methods)
-    ax.invert_yaxis()
-    ax.set_xlabel("NDCG@10")
-    ax.set_title(f"Retrieval Benchmark -- {dataset_label} ({model_label})")
-    ax.set_xlim(0, max(values) * 1.15 if values else 1.0)
-
-    for bar, val in zip(bars, values):
-        ax.text(
-            bar.get_width() + 0.002,
-            bar.get_y() + bar.get_height() / 2,
-            f"{val:.4f}",
-            va="center",
-            fontsize=9,
-        )
-
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"  Chart saved to {output_path}")
-
-
-def save_timing_csv(timings, output_path):
-    """Write per-step timing data as a CSV file.
-
-    *timings* is a list of ``(step_label, seconds)`` tuples.
-    A final row with the total elapsed time is appended automatically.
-    Any existing file at *output_path* is overwritten.
-    """
-    ensure_dir(os.path.dirname(output_path))
-    total = sum(t for _, t in timings)
-    with open(output_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Step", "Time (s)"])
-        for label, secs in timings:
-            writer.writerow([label, f"{secs:.2f}"])
-        writer.writerow(["Total", f"{total:.2f}"])

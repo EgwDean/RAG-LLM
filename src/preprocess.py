@@ -9,7 +9,8 @@ Artifacts built here:
   - tokenized_corpus.jsonl
   - tokenized_queries.jsonl
   - bm25_index.pkl + bm25_doc_ids.pkl
-  - word_freq_index.pkl
+    - word_freq_index.pkl
+    - doc_freq_index.pkl
   - corpus_embeddings.pt + corpus_ids.pkl
   - query_vectors.pt + query_ids.pkl
   - query_tokens.pkl
@@ -127,6 +128,23 @@ def build_bm25_and_word_freq_index(tokenized_corpus_jsonl):
         f"{total_tokens:,} total occurrences."
     )
     return bm25, doc_ids, global_counts, total_tokens
+
+
+def build_doc_freq_index(tokenized_corpus_jsonl):
+    """Build document frequency index: token -> number of docs containing token."""
+    doc_freq = {}
+    total_docs = 0
+
+    num_lines = count_lines(tokenized_corpus_jsonl)
+    with open(tokenized_corpus_jsonl, "r", encoding="utf-8") as f:
+        for line in tqdm(f, total=num_lines, desc="  Building doc frequency", dynamic_ncols=True):
+            d = json.loads(line)
+            total_docs += 1
+            for token in set(d.get("tokens", [])):
+                doc_freq[token] = doc_freq.get(token, 0) + 1
+
+    print(f"  Document-frequency index: {len(doc_freq):,} unique tokens over {total_docs:,} docs.")
+    return doc_freq, total_docs
 
 
 def _encode_with_oom_retry(model, texts, device, batch_size):
@@ -261,6 +279,7 @@ def run_for_dataset(dataset_name, cfg, model, device):
     bm25_pkl = os.path.join(ds_dir, "bm25_index.pkl")
     bm25_docids_pkl = os.path.join(ds_dir, "bm25_doc_ids.pkl")
     word_freq_pkl = os.path.join(ds_dir, "word_freq_index.pkl")
+    doc_freq_pkl = os.path.join(ds_dir, "doc_freq_index.pkl")
     corpus_emb_pt = os.path.join(ds_dir, "corpus_embeddings.pt")
     corpus_ids_pkl = os.path.join(ds_dir, "corpus_ids.pkl")
     query_vectors_pt = os.path.join(ds_dir, "query_vectors.pt")
@@ -306,18 +325,25 @@ def run_for_dataset(dataset_name, cfg, model, device):
         stemmer_lang,
     )
 
-    # 4) BM25 + frequency index
-    has_index = file_exists(bm25_pkl) and file_exists(bm25_docids_pkl) and file_exists(word_freq_pkl)
+    # 4) BM25 + frequency indexes
+    has_index = (
+        file_exists(bm25_pkl)
+        and file_exists(bm25_docids_pkl)
+        and file_exists(word_freq_pkl)
+        and file_exists(doc_freq_pkl)
+    )
     if has_index:
-        print("[4/6] BM25 and frequency indexes exist. Skipping.")
+        print("[4/6] BM25 + frequency indexes exist. Skipping.")
     else:
         print("[4/6] Building BM25 + frequency indexes ...")
         bm25, bm25_doc_ids, global_counts, total_corpus_tokens = build_bm25_and_word_freq_index(
             tokenized_corpus_jsonl
         )
+        doc_freq, total_docs = build_doc_freq_index(tokenized_corpus_jsonl)
         save_pickle(bm25, bm25_pkl)
         save_pickle(bm25_doc_ids, bm25_docids_pkl)
         save_pickle((global_counts, total_corpus_tokens), word_freq_pkl)
+        save_pickle((doc_freq, total_docs), doc_freq_pkl)
 
     # 5) Corpus embeddings
     if file_exists(corpus_emb_pt) and file_exists(corpus_ids_pkl):

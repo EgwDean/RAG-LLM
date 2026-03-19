@@ -5,18 +5,16 @@ This repository benchmarks sparse, dense, and hybrid retrieval on BEIR datasets 
 1. Preprocess and cache all heavy artifacts once.
 2. Run retrieval and evaluation repeatedly on the cached data.
 
-The current hybrid logic includes a dynamic, statistically normalized wRRF pipeline with grid search over query-cleaning and routing parameters.
+The current hybrid logic uses supervised query-level routing in a leave-one-dataset-out (LOODO) setup.
 
 ## Methods evaluated
 
-For each configured dataset, retrieval evaluates:
+For each configured dataset, the evaluation script reports:
 
 1. BM25 Only
 2. Dense Only
 3. RRF (static)
-4. Dynamic JSD-wRRF (best over grid)
-5. Dynamic KLD-wRRF (best over grid)
-6. Dynamic CE-wRRF (best over grid)
+4. Dynamic wRRF (alpha predicted by a PyTorch logistic regression model)
 
 All methods are scored with NDCG@k (default k=10).
 
@@ -28,9 +26,9 @@ requirements.txt
 src/
   pipeline.py      # legacy reference pipeline (kept for comparison)
   utils.py
-  donwload.py      # dataset downloader
-  preproces.py     # preprocessing/cache builder
-  retrieval.py     # retrieval + evaluation on cached artifacts
+  download.py      # dataset downloader
+  preprocess.py    # preprocessing/cache builder
+  retrieve_and_evaluate.py  # LOODO supervised benchmark
   correct.py       # migrate old cached files from results -> processed_data
   fix.py           # one-time stale-cache cleanup for new retrieval logic
 data/
@@ -58,7 +56,7 @@ Edit config.yaml to choose:
 1. Active datasets (all uncommented entries are processed/evaluated).
 2. Embedding model and batch size.
 3. Retrieval/evaluation settings.
-4. Dynamic wRRF grid values.
+4. Supervised routing feature/training settings.
 
 Important sections:
 
@@ -81,9 +79,13 @@ benchmark:
   ndcg_k: 10
   rrf:
     k: 60
-  dynamic_wrrf:
-    max_df_values: [0.5, 0.8]
-    k_values: [1.0, 2.0, 3.0]
+
+supervised_routing:
+  overlap_k: 100
+  epsilon: 1.0e-9
+  C: 1.0
+  optimizer: "adam"
+  learning_rate: 0.05
 ```
 
 ## Run order
@@ -91,13 +93,13 @@ benchmark:
 1. Download datasets
 
 ```bash
-python src/donwload.py
+python src/download.py
 ```
 
 2. Build caches (corpus/query files, BM25 index, frequency index, embeddings)
 
 ```bash
-python src/preproces.py
+python src/preprocess.py
 ```
 
 3. Optional migration for previously generated caches
@@ -112,41 +114,30 @@ python src/correct.py
 python src/fix.py
 ```
 
-5. Run retrieval + evaluation
+5. Run LOODO retrieval + evaluation
 
 ```bash
-python src/retrieval.py
+python src/retrieve_and_evaluate.py
 ```
 
-## Dynamic wRRF details
+## Supervised Routing Details
 
-The retrieval stage applies the following per dataset:
+The evaluation stage applies the following:
 
-1. Query cleaning:
-   - Remove English stopwords.
-   - Remove high document-frequency terms above max_df.
-   - If query becomes empty, force alpha=0.0.
-2. Metric computation on cleaned queries:
-   - KLD, JSD, and length-normalized CE.
-3. Standardization:
-   - Convert metric values to z-scores per dataset.
-4. Routing:
-   - alpha = 1 / (1 + exp(-k * z)).
-5. Fusion:
-   - Min-max normalize BM25 and Dense scores first.
-   - Score = alpha * BM25 + (1 - alpha) * Dense.
-6. Lightweight grid search:
-   - max_df in [0.5, 0.8]
-   - k in [1.0, 2.0, 3.0]
+1. Build per-query feature/label rows from cached sparse+dense retrieval.
+2. Train one logistic regression model per LOODO fold.
+3. Predict query-level alpha values on held-out datasets.
+4. Fuse sparse+dense rankings with dynamic wRRF and compare against baselines.
 
 ## Outputs
 
-Retrieval writes model-level summary files under data/results/<model>/:
+The supervised benchmark writes files under data/results/<model>/supervised_routing/:
 
-1. summary_ndcg.csv
-2. best_dynamic_params.csv
-3. summary_ndcg.png
-4. retrieval_timing.csv
+1. per_dataset_results.csv
+2. loodo_macro_summary.csv
+3. predicted_alphas.csv
+4. fold_models/*.pt
+5. plots/*.png
 
 Processed artifacts are cached under data/processed_data/<model>/<dataset>/ and reused across runs.
 
