@@ -219,7 +219,11 @@ def optimize_bm25(cfg):
                 b=b,
                 use_stemming=use_stemming,
             )
-            ndcg = calculate_dataset_ndcg_at_k(bm25_results, qrels, ndcg_k)
+            bm25_score_map = {
+                qid: {doc_id: score for doc_id, score in pairs}
+                for qid, pairs in bm25_results.items()
+            }
+            ndcg = calculate_dataset_ndcg_at_k(bm25_score_map, qrels, ndcg_k)
             ds_scores.append(ndcg)
 
             per_dataset_rows.append(
