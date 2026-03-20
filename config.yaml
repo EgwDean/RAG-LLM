@@ -116,7 +116,7 @@ benchmark:
 # Used by: python src/retrieve_and_evaluate.py
 supervised_routing:
   # Feature construction
-  overlap_k: 100
+  overlap_k: 10
   epsilon: 1.0e-8
   ce_smoothing_alpha: 1.0
   feature_workers: 8

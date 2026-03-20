@@ -65,7 +65,10 @@ FEATURE_NAMES = [
     "query_length",
     "dense_confidence",
     "sparse_confidence",
+    "top_dense_score",
+    "top_sparse_score",
     "average_idf",
+    "max_idf",
     "stopword_ratio",
 ]
 
@@ -398,12 +401,16 @@ def compute_feature_row_for_query(
     else:
         dense_confidence = 0.0
 
+    top_dense_score = float(dense_for_query[0][1]) if dense_for_query else 0.0
+
     if len(bm25_for_query) >= 2:
         sparse_confidence = float(bm25_for_query[0][1] - bm25_for_query[1][1])
     elif len(bm25_for_query) == 1:
         sparse_confidence = float(bm25_for_query[0][1])
     else:
         sparse_confidence = 0.0
+
+    top_sparse_score = float(bm25_for_query[0][1]) if bm25_for_query else 0.0
 
     # Features requiring stopword-filtered tokens.
     vocab_size = max(1, len(word_freq))
@@ -412,19 +419,21 @@ def compute_feature_row_for_query(
     if not cleaned_tokens:
         cross_entropy = 0.0
         average_idf = 0.0
+        max_idf = 0.0
     else:
         ce_sum = 0.0
-        idf_sum = 0.0
+        idf_values = []
         for token in cleaned_tokens:
             prob = (word_freq.get(token, 0) + ce_smoothing_alpha) / corpus_mass
             ce_sum += -math.log2(max(prob, epsilon))
 
             # Smooth IDF to avoid singularities and keep finite values.
             idf = math.log((total_docs + 1.0) / (doc_freq.get(token, 0) + 1.0)) + 1.0
-            idf_sum += idf
+            idf_values.append(idf)
 
         cross_entropy = float(ce_sum / len(cleaned_tokens))
-        average_idf = float(idf_sum / len(cleaned_tokens))
+        average_idf = float(sum(idf_values) / len(idf_values))
+        max_idf = float(max(idf_values))
 
     # Soft label from sparse-only and dense-only query-level NDCG@k.
     sparse_q_ndcg = query_ndcg_at_k(bm25_for_query, qrels_for_query, ndcg_k)
@@ -441,7 +450,10 @@ def compute_feature_row_for_query(
             "query_length": query_length,
             "dense_confidence": dense_confidence,
             "sparse_confidence": sparse_confidence,
+            "top_dense_score": top_dense_score,
+            "top_sparse_score": top_sparse_score,
             "average_idf": average_idf,
+            "max_idf": max_idf,
             "stopword_ratio": stopword_ratio,
         },
         "soft_label": label,
