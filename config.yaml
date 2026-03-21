@@ -105,10 +105,20 @@ dense_search:
 # Benchmark / evaluation
 # ------------------------------------------------------------
 benchmark:
+  #evaluation_mode: "loodo"
+  evaluation_mode: "within_dataset"
   top_k: 100
   ndcg_k: 10
   rrf:
     k: 60               # RRF damping constant (Cormack et al. 2009)
+
+# ------------------------------------------------------------
+# Within-dataset supervised routing evaluation
+# ------------------------------------------------------------
+within_dataset_evaluation:
+  train_fraction: 0.8
+  n_repeats: 5
+  shuffle: true
 
 # ------------------------------------------------------------
 # Supervised query-level routing benchmark (LOODO)

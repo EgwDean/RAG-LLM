@@ -144,6 +144,41 @@ def calculate_dataset_ndcg_at_k(score_map_by_qid, qrels, k):
     return float(np.mean(ndcgs)) if ndcgs else 0.0
 
 
+def calculate_dataset_ndcg_at_k_subset(score_map_by_qid, qrels, k, query_ids):
+    """Compute average NDCG@k over a supplied query-id subset."""
+    ndcgs = []
+    for qid in query_ids:
+        rels = qrels.get(qid, {})
+        q_scores = score_map_by_qid.get(qid, {})
+        ranked = sorted(q_scores.items(), key=lambda x: x[1], reverse=True)
+        ndcgs.append(query_ndcg_at_k(ranked, rels, k))
+    return float(np.mean(ndcgs)) if ndcgs else 0.0
+
+
+def evaluate_benchmark_methods_for_qids(
+    bm25_results,
+    dense_results,
+    qrels,
+    ndcg_k,
+    rrf_k,
+    query_ids,
+    alpha_map=None,
+):
+    """Evaluate benchmark methods over a supplied query-id subset."""
+    sparse_scores, dense_scores = bm25_and_dense_to_score_maps(bm25_results, dense_results)
+    static_rrf_scores = apply_static_rrf(bm25_results, dense_results, rrf_k=rrf_k)
+    if alpha_map is None:
+        alpha_map = {}
+    dynamic_scores = apply_dynamic_wrrf(bm25_results, dense_results, alpha_map, rrf_k=rrf_k)
+
+    return {
+        "dense_only_ndcg": calculate_dataset_ndcg_at_k_subset(dense_scores, qrels, ndcg_k, query_ids),
+        "sparse_only_ndcg": calculate_dataset_ndcg_at_k_subset(sparse_scores, qrels, ndcg_k, query_ids),
+        "static_rrf_ndcg": calculate_dataset_ndcg_at_k_subset(static_rrf_scores, qrels, ndcg_k, query_ids),
+        "dynamic_wrrf_ndcg": calculate_dataset_ndcg_at_k_subset(dynamic_scores, qrels, ndcg_k, query_ids),
+    }
+
+
 def bm25_and_dense_to_score_maps(bm25_results, dense_results):
     """Convert ranked retrieval lists to score dictionaries per query."""
     sparse_scores = {qid: {doc_id: score for doc_id, score in pairs} for qid, pairs in bm25_results.items()}
@@ -619,6 +654,39 @@ def rows_to_matrix(rows):
     return X, y, qids
 
 
+def split_rows_train_test(rows, train_fraction, repeat_seed, shuffle=True):
+    """Create a reproducible train/test split from dataset rows."""
+    n_rows = len(rows)
+    if n_rows < 2:
+        raise ValueError("Within-dataset evaluation requires at least two query rows.")
+    if not (0.0 < train_fraction < 1.0):
+        raise ValueError(f"train_fraction must be in (0, 1), got {train_fraction}.")
+
+    indices = list(range(n_rows))
+    if shuffle:
+        rng = random.Random(repeat_seed)
+        rng.shuffle(indices)
+
+    n_train = int(train_fraction * n_rows)
+    n_train = max(1, min(n_rows - 1, n_train))
+
+    train_idx = indices[:n_train]
+    test_idx = indices[n_train:]
+    train_rows = [rows[i] for i in train_idx]
+    test_rows = [rows[i] for i in test_idx]
+
+    if not train_rows or not test_rows:
+        raise ValueError("Train/test split failed: one split is empty.")
+
+    return train_rows, test_rows
+
+
+def dataset_seed_offset(dataset_name):
+    """Derive a stable integer offset from a dataset name."""
+    digest = hashlib.md5(dataset_name.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
 def compute_zscore_stats(X):
     """Compute z-score stats with zero-variance safeguard."""
     mean = X.mean(axis=0)
@@ -848,6 +916,258 @@ def save_fold_normalization_stats_csv(rows, output_csv):
             )
 
 
+def save_within_per_repeat_results(rows, output_csv):
+    """Save per-repeat within-dataset benchmark results."""
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "dataset",
+                "repeat",
+                "train_size",
+                "test_size",
+                "dense_only_ndcg",
+                "sparse_only_ndcg",
+                "static_rrf_ndcg",
+                "dynamic_wrrf_ndcg",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row["dataset"],
+                    row["repeat"],
+                    row["train_size"],
+                    row["test_size"],
+                    f"{row['dense_only_ndcg']:.6f}",
+                    f"{row['sparse_only_ndcg']:.6f}",
+                    f"{row['static_rrf_ndcg']:.6f}",
+                    f"{row['dynamic_wrrf_ndcg']:.6f}",
+                ]
+            )
+
+
+def summarize_within_dataset_rows(per_repeat_rows):
+    """Aggregate within-dataset per-repeat rows into mean/std summaries."""
+    by_dataset = {}
+    for row in per_repeat_rows:
+        by_dataset.setdefault(row["dataset"], []).append(row)
+
+    summary_rows = []
+    for dataset in sorted(by_dataset.keys()):
+        rows = by_dataset[dataset]
+        dense_vals = [r["dense_only_ndcg"] for r in rows]
+        sparse_vals = [r["sparse_only_ndcg"] for r in rows]
+        static_vals = [r["static_rrf_ndcg"] for r in rows]
+        dynamic_vals = [r["dynamic_wrrf_ndcg"] for r in rows]
+        summary_rows.append(
+            {
+                "dataset": dataset,
+                "dense_only_mean": float(np.mean(dense_vals)),
+                "dense_only_std": float(np.std(dense_vals)),
+                "sparse_only_mean": float(np.mean(sparse_vals)),
+                "sparse_only_std": float(np.std(sparse_vals)),
+                "static_rrf_mean": float(np.mean(static_vals)),
+                "static_rrf_std": float(np.std(static_vals)),
+                "dynamic_wrrf_mean": float(np.mean(dynamic_vals)),
+                "dynamic_wrrf_std": float(np.std(dynamic_vals)),
+            }
+        )
+    return summary_rows
+
+
+def save_within_dataset_summary(rows, output_csv):
+    """Save aggregated within-dataset means/stds over repeats."""
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "dataset",
+                "dense_only_mean",
+                "dense_only_std",
+                "sparse_only_mean",
+                "sparse_only_std",
+                "static_rrf_mean",
+                "static_rrf_std",
+                "dynamic_wrrf_mean",
+                "dynamic_wrrf_std",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row["dataset"],
+                    f"{row['dense_only_mean']:.6f}",
+                    f"{row['dense_only_std']:.6f}",
+                    f"{row['sparse_only_mean']:.6f}",
+                    f"{row['sparse_only_std']:.6f}",
+                    f"{row['static_rrf_mean']:.6f}",
+                    f"{row['static_rrf_std']:.6f}",
+                    f"{row['dynamic_wrrf_mean']:.6f}",
+                    f"{row['dynamic_wrrf_std']:.6f}",
+                ]
+            )
+
+
+def save_within_macro_summary(rows, output_csv):
+    """Save macro average over dataset-level within-dataset means."""
+    if not rows:
+        raise ValueError("No within-dataset summary rows available for macro summary.")
+
+    methods = [
+        ("Dense only", "dense_only_mean"),
+        ("Sparse only", "sparse_only_mean"),
+        ("Static RRF", "static_rrf_mean"),
+        ("Dynamic wRRF", "dynamic_wrrf_mean"),
+    ]
+
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["method", "macro_avg_ndcg"])
+        for label, key in methods:
+            writer.writerow([label, f"{np.mean([r[key] for r in rows]):.6f}"])
+
+
+def save_within_coefficients_csv(rows, output_csv):
+    """Save per-dataset per-repeat logistic coefficients."""
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["dataset", "repeat", "term", "coefficient"])
+        for row in rows:
+            writer.writerow([row["dataset"], row["repeat"], row["term"], f"{row['coefficient']:.12f}"])
+
+
+def save_within_norm_stats_csv(rows, output_csv):
+    """Save per-dataset per-repeat train/test normalization stats."""
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["dataset", "repeat", "split", "feature", "mean", "std"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row["dataset"],
+                    row["repeat"],
+                    row["split"],
+                    row["feature"],
+                    f"{row['mean']:.12f}",
+                    f"{row['std']:.12f}",
+                ]
+            )
+
+
+def save_within_alpha_summary(alpha_rows, output_csv):
+    """Save simple alpha mean/std summary per dataset."""
+    by_dataset = {}
+    for row in alpha_rows:
+        by_dataset.setdefault(row["dataset"], []).append(row["alpha"])
+
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["dataset", "alpha_mean", "alpha_std"])
+        for dataset in sorted(by_dataset.keys()):
+            vals = by_dataset[dataset]
+            writer.writerow([dataset, f"{np.mean(vals):.6f}", f"{np.std(vals):.6f}"])
+
+
+def save_within_dataset_plots(summary_rows, alpha_rows, output_dir):
+    """Save compact within-dataset summary and alpha plots."""
+    ensure_dir(output_dir)
+    if not summary_rows:
+        return
+
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Serif",
+            "font.size": 11,
+            "axes.titlesize": 13,
+            "axes.labelsize": 12,
+            "legend.fontsize": 10,
+        }
+    )
+
+    datasets = [r["dataset"] for r in summary_rows]
+    x = np.arange(len(datasets), dtype=np.float64)
+    width = 0.2
+
+    dense_mean = [r["dense_only_mean"] for r in summary_rows]
+    sparse_mean = [r["sparse_only_mean"] for r in summary_rows]
+    static_mean = [r["static_rrf_mean"] for r in summary_rows]
+    dynamic_mean = [r["dynamic_wrrf_mean"] for r in summary_rows]
+
+    dense_std = [r["dense_only_std"] for r in summary_rows]
+    sparse_std = [r["sparse_only_std"] for r in summary_rows]
+    static_std = [r["static_rrf_std"] for r in summary_rows]
+    dynamic_std = [r["dynamic_wrrf_std"] for r in summary_rows]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(
+        x - 1.5 * width,
+        dense_mean,
+        width=width,
+        yerr=dense_std,
+        capsize=3,
+        label="Dense only",
+        color="#355C7D",
+    )
+    ax.bar(
+        x - 0.5 * width,
+        sparse_mean,
+        width=width,
+        yerr=sparse_std,
+        capsize=3,
+        label="Sparse only",
+        color="#6C5B7B",
+    )
+    ax.bar(
+        x + 0.5 * width,
+        static_mean,
+        width=width,
+        yerr=static_std,
+        capsize=3,
+        label="Static RRF",
+        color="#F67280",
+    )
+    ax.bar(
+        x + 1.5 * width,
+        dynamic_mean,
+        width=width,
+        yerr=dynamic_std,
+        capsize=3,
+        label="Dynamic wRRF",
+        color="#C06C84",
+    )
+
+    ax.set_title("Within-Dataset Benchmark (Mean over Repeats)")
+    ax.set_ylabel("NDCG@10")
+    ax.set_xticks(x)
+    ax.set_xticklabels(datasets, rotation=30, ha="right")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(ncols=2)
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, "within_dataset_comparison.png"), dpi=220)
+    plt.close(fig)
+
+    if alpha_rows:
+        by_dataset = {}
+        for row in alpha_rows:
+            by_dataset.setdefault(row["dataset"], []).append(row["alpha"])
+
+        labels = sorted(by_dataset.keys())
+        values = [by_dataset[k] for k in labels]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.boxplot(values, tick_labels=labels, patch_artist=True)
+        ax.set_title("Within-Dataset Predicted Alpha Distribution")
+        ax.set_ylabel("Predicted alpha (0=dense, 1=sparse)")
+        ax.set_ylim(0.0, 1.0)
+        ax.grid(axis="y", alpha=0.25)
+        plt.xticks(rotation=25, ha="right")
+        plt.tight_layout()
+        fig.savefig(os.path.join(output_dir, "within_dataset_alpha_distribution.png"), dpi=220)
+        plt.close(fig)
+
+
 def save_plots(rows, alpha_rows, output_dir):
     """Save publication-style plots for per-dataset and macro comparisons."""
     ensure_dir(output_dir)
@@ -929,9 +1249,209 @@ def save_plots(rows, alpha_rows, output_dir):
         plt.close(fig)
 
 
+def run_within_dataset_benchmark(
+    cfg,
+    datasets,
+    device,
+    short_model,
+    ndcg_k,
+    rrf_k,
+    dataset_cache_map,
+    rows_by_dataset,
+    feature_cache_pkl,
+    feature_cache_csv,
+):
+    """Run supervised routing with train/test splits inside each dataset."""
+    routing_cfg = cfg.get("supervised_routing", {})
+    seed = int(routing_cfg.get("seed", 42))
+
+    within_cfg = cfg.get("within_dataset_evaluation", {})
+    train_fraction = float(within_cfg.get("train_fraction", 0.8))
+    n_repeats = int(within_cfg.get("n_repeats", 5))
+    shuffle = bool(within_cfg.get("shuffle", True))
+
+    if n_repeats <= 0:
+        raise ValueError(f"within_dataset_evaluation.n_repeats must be > 0, got {n_repeats}.")
+
+    results_root = get_config_path(cfg, "results_folder", "data/results")
+    benchmark_dir = os.path.join(results_root, short_model, "within_dataset_routing")
+    plots_dir = os.path.join(benchmark_dir, "plots")
+    ensure_dir(benchmark_dir)
+    ensure_dir(plots_dir)
+
+    print("\n[3/4] Running within-dataset repeats ...")
+    print(
+        f"Within-dataset config: train_fraction={train_fraction}, "
+        f"n_repeats={n_repeats}, shuffle={shuffle}"
+    )
+
+    per_repeat_rows = []
+    alpha_rows = []
+    coefficient_rows = []
+    norm_rows = []
+
+    for dataset_name in datasets:
+        ds_rows = list(rows_by_dataset[dataset_name])
+        if len(ds_rows) < 2:
+            raise ValueError(
+                f"Dataset {dataset_name} has only {len(ds_rows)} query rows; at least 2 required."
+            )
+
+        ds_seed_offset = dataset_seed_offset(dataset_name)
+        print(f"\n{'-' * 68}")
+        print(f"Dataset: {dataset_name} | Query rows: {len(ds_rows):,}")
+        print(f"{'-' * 68}")
+
+        for repeat_idx in range(n_repeats):
+            repeat = repeat_idx + 1
+            repeat_seed = seed + repeat_idx + ds_seed_offset
+            train_rows, test_rows = split_rows_train_test(
+                ds_rows,
+                train_fraction=train_fraction,
+                repeat_seed=repeat_seed,
+                shuffle=shuffle,
+            )
+
+            X_train_raw, y_train, _ = rows_to_matrix(train_rows)
+            X_test_raw, _, test_qids = rows_to_matrix(test_rows)
+
+            train_mean, train_std = compute_zscore_stats(X_train_raw)
+            X_train = apply_zscore(X_train_raw, train_mean, train_std)
+
+            test_mean, test_std = compute_zscore_stats(X_test_raw)
+            X_test = apply_zscore(X_test_raw, test_mean, test_std)
+
+            for feat_idx, feat_name in enumerate(FEATURE_NAMES):
+                norm_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "repeat": repeat,
+                        "split": "train",
+                        "feature": feat_name,
+                        "mean": float(train_mean[feat_idx]),
+                        "std": float(train_std[feat_idx]),
+                    }
+                )
+                norm_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "repeat": repeat,
+                        "split": "test",
+                        "feature": feat_name,
+                        "mean": float(test_mean[feat_idx]),
+                        "std": float(test_std[feat_idx]),
+                    }
+                )
+
+            print(
+                f"  Repeat {repeat}/{n_repeats} | "
+                f"train={len(train_rows):,}, test={len(test_rows):,}, seed={repeat_seed}"
+            )
+            model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
+
+            intercept, coef_by_feature = extract_model_coefficients(model, FEATURE_NAMES)
+            coefficient_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "repeat": repeat,
+                    "term": "intercept",
+                    "coefficient": intercept,
+                }
+            )
+            for feat_name in FEATURE_NAMES:
+                coefficient_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "repeat": repeat,
+                        "term": feat_name,
+                        "coefficient": coef_by_feature[feat_name],
+                    }
+                )
+
+            alphas = predict_alpha(model, X_test, device)
+            alpha_map = {qid: float(alpha) for qid, alpha in zip(test_qids, alphas)}
+            alpha_rows.extend(
+                {
+                    "dataset": dataset_name,
+                    "repeat": repeat,
+                    "query_id": qid,
+                    "alpha": float(alpha),
+                }
+                for qid, alpha in zip(test_qids, alphas)
+            )
+
+            ds_cache = dataset_cache_map[dataset_name]
+            metrics = evaluate_benchmark_methods_for_qids(
+                bm25_results=ds_cache["bm25_results"],
+                dense_results=ds_cache["dense_results"],
+                qrels=ds_cache["qrels"],
+                ndcg_k=ndcg_k,
+                rrf_k=rrf_k,
+                query_ids=test_qids,
+                alpha_map=alpha_map,
+            )
+
+            print(
+                f"    Dense={metrics['dense_only_ndcg']:.4f} | "
+                f"Sparse={metrics['sparse_only_ndcg']:.4f} | "
+                f"Static={metrics['static_rrf_ndcg']:.4f} | "
+                f"Dynamic={metrics['dynamic_wrrf_ndcg']:.4f}"
+            )
+
+            per_repeat_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "repeat": repeat,
+                    "train_size": len(train_rows),
+                    "test_size": len(test_rows),
+                    **metrics,
+                }
+            )
+
+    print("\n[4/4] Writing within-dataset outputs and plots ...")
+
+    per_repeat_csv = os.path.join(benchmark_dir, "per_repeat_results.csv")
+    per_dataset_summary_csv = os.path.join(benchmark_dir, "per_dataset_summary.csv")
+    macro_csv = os.path.join(benchmark_dir, "macro_summary.csv")
+    alpha_csv = os.path.join(benchmark_dir, "predicted_alphas.csv")
+    coefficients_csv = os.path.join(benchmark_dir, "coefficients.csv")
+    norm_csv = os.path.join(benchmark_dir, "normalization_stats.csv")
+    alpha_summary_csv = os.path.join(benchmark_dir, "alpha_summary.csv")
+
+    save_within_per_repeat_results(per_repeat_rows, per_repeat_csv)
+    summary_rows = summarize_within_dataset_rows(per_repeat_rows)
+    save_within_dataset_summary(summary_rows, per_dataset_summary_csv)
+    save_within_macro_summary(summary_rows, macro_csv)
+
+    with open(alpha_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["dataset", "repeat", "query_id", "alpha"])
+        for row in alpha_rows:
+            writer.writerow([row["dataset"], row["repeat"], row["query_id"], f"{row['alpha']:.6f}"])
+
+    save_within_coefficients_csv(coefficient_rows, coefficients_csv)
+    save_within_norm_stats_csv(norm_rows, norm_csv)
+    save_within_alpha_summary(alpha_rows, alpha_summary_csv)
+    save_within_dataset_plots(summary_rows, alpha_rows, plots_dir)
+
+    print("\n" + "=" * 72)
+    print("WITHIN-DATASET supervised routing benchmark completed.")
+    print(f"Per-query feature cache (pkl): {feature_cache_pkl}")
+    print(f"Per-query feature cache (csv): {feature_cache_csv}")
+    print(f"Per-repeat results CSV        : {per_repeat_csv}")
+    print(f"Per-dataset summary CSV       : {per_dataset_summary_csv}")
+    print(f"Macro summary CSV             : {macro_csv}")
+    print(f"Predicted alphas CSV          : {alpha_csv}")
+    print(f"Coefficients CSV              : {coefficients_csv}")
+    print(f"Normalization stats CSV       : {norm_csv}")
+    print(f"Alpha summary CSV             : {alpha_summary_csv}")
+    print(f"Plots directory               : {plots_dir}")
+    print("=" * 72)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run LOODO supervised query-level routing benchmark."
+        description="Run supervised routing benchmark in LOODO or within-dataset mode."
     )
     parser.add_argument(
         "--config",
@@ -944,8 +1464,8 @@ def main():
     cfg = load_config()
 
     datasets = cfg.get("datasets", [])
-    if len(datasets) < 2:
-        raise ValueError("LOODO requires at least two configured datasets.")
+    if not datasets:
+        raise ValueError("No datasets configured.")
 
     routing_cfg = cfg.get("supervised_routing", {})
     seed = int(routing_cfg.get("seed", 42))
@@ -958,6 +1478,12 @@ def main():
     short_model = model_short_name(model_name)
     ndcg_k = int(cfg["benchmark"].get("ndcg_k", 10))
     rrf_k = int(cfg["benchmark"].get("rrf", {}).get("k", 60))
+    eval_mode = str(cfg.get("benchmark", {}).get("evaluation_mode", "loodo")).strip().lower()
+    if eval_mode not in {"loodo", "within_dataset"}:
+        raise ValueError(
+            f"Unsupported benchmark.evaluation_mode={eval_mode!r}. "
+            "Use 'loodo' or 'within_dataset'."
+        )
 
     results_root = get_config_path(cfg, "results_folder", "data/results")
     benchmark_dir = os.path.join(results_root, short_model, "supervised_routing")
@@ -970,6 +1496,7 @@ def main():
     print(f"Device : {device}")
     print(f"Model  : {model_name}")
     print(f"Datasets ({len(datasets)}): {', '.join(datasets)}")
+    print(f"Evaluation mode: {eval_mode}")
     print("\n[1/4] Loading cached retrieval artifacts per dataset ...")
 
     dataset_cache_map = {}
@@ -993,6 +1520,24 @@ def main():
     # Keep query-order deterministic across runs.
     for ds in datasets:
         rows_by_dataset[ds].sort(key=lambda r: r["query_id"])
+
+    if eval_mode == "within_dataset":
+        run_within_dataset_benchmark(
+            cfg=cfg,
+            datasets=datasets,
+            device=device,
+            short_model=short_model,
+            ndcg_k=ndcg_k,
+            rrf_k=rrf_k,
+            dataset_cache_map=dataset_cache_map,
+            rows_by_dataset=rows_by_dataset,
+            feature_cache_pkl=feature_cache_pkl,
+            feature_cache_csv=feature_cache_csv,
+        )
+        return
+
+    if len(datasets) < 2:
+        raise ValueError("LOODO requires at least two configured datasets.")
 
     print("\n[3/4] Running LOODO folds with cached model reuse ...")
     fold_results = []
