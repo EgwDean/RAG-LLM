@@ -6,12 +6,12 @@ This script reuses preprocessing artifacts and retrieval caches to benchmark:
   1) Dense only
   2) Sparse only (BM25)
   3) Static RRF
-  4) Dynamic weighted RRF with per-query alpha predicted by logistic regression
+    4) Dynamic weighted RRF with per-query alpha predicted by a supervised router
 
 Important methodological points:
   - No oracle search on the held-out dataset.
   - Soft labels are query-level targets in [0, 1], not hard classes.
-  - Logistic regression is implemented in PyTorch with BCEWithLogitsLoss.
+    - Supports logistic regression (PyTorch) and random forest regression (scikit-learn).
 """
 
 import argparse
@@ -853,6 +853,137 @@ def extract_model_coefficients(model, feature_names):
     return intercept, coef_by_feature
 
 
+def get_router_model_type(cfg):
+    """Return selected routing model type from config."""
+    routing_cfg = cfg.get("supervised_routing", {})
+    return str(routing_cfg.get("model_type", "logistic")).strip().lower()
+
+
+def get_random_forest_config(cfg):
+    """Return random forest hyperparameters with conservative defaults."""
+    routing_cfg = cfg.get("supervised_routing", {})
+    rf_cfg = cfg.get("random_forest", {})
+    return {
+        "n_estimators": int(rf_cfg.get("n_estimators", 300)),
+        "max_depth": None if rf_cfg.get("max_depth", 8) is None else int(rf_cfg.get("max_depth", 8)),
+        "min_samples_split": int(rf_cfg.get("min_samples_split", 8)),
+        "min_samples_leaf": int(rf_cfg.get("min_samples_leaf", 4)),
+        "max_features": rf_cfg.get("max_features", "sqrt"),
+        "bootstrap": bool(rf_cfg.get("bootstrap", True)),
+        "n_jobs": int(rf_cfg.get("n_jobs", -1)),
+        "random_state": int(rf_cfg.get("random_state", routing_cfg.get("seed", 42))),
+    }
+
+
+def _create_random_forest_regressor(cfg):
+    """Create RandomForestRegressor with clear sklearn-missing error."""
+    try:
+        from sklearn.ensemble import RandomForestRegressor
+    except ImportError as exc:
+        raise RuntimeError(
+            "Random forest routing requires scikit-learn. Install it (e.g. pip install scikit-learn) "
+            "or switch supervised_routing.model_type to 'logistic'."
+        ) from exc
+
+    rf_params = get_random_forest_config(cfg)
+    return RandomForestRegressor(**rf_params)
+
+
+def train_router_model(X_train, y_train, cfg, device):
+    """Train selected router model and return a model bundle."""
+    model_type = get_router_model_type(cfg)
+    if model_type == "logistic":
+        model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
+        return {"model_type": model_type, "model": model}
+    if model_type == "random_forest":
+        model = _create_random_forest_regressor(cfg)
+        model.fit(X_train, y_train)
+        return {"model_type": model_type, "model": model}
+    raise ValueError(
+        f"Unsupported supervised_routing.model_type={model_type!r}. "
+        "Use 'logistic' or 'random_forest'."
+    )
+
+
+def predict_router_alpha(model_bundle, X, cfg, device):
+    """Predict per-query alpha in [0, 1] for any supported router type."""
+    model_type = model_bundle["model_type"]
+    model = model_bundle["model"]
+
+    if model_type == "logistic":
+        return predict_alpha(model, X, device)
+    if model_type == "random_forest":
+        pred = model.predict(X)
+        return np.clip(pred, 0.0, 1.0).astype(np.float32)
+
+    raise ValueError(f"Unsupported router model type in prediction: {model_type!r}")
+
+
+def extract_router_importance_or_coefficients(model_bundle, feature_names, cfg):
+    """Return model effects mapped by feature with an intercept-compatible value."""
+    model_type = model_bundle["model_type"]
+    model = model_bundle["model"]
+
+    if model_type == "logistic":
+        intercept, values = extract_model_coefficients(model, feature_names)
+        return intercept, values, "coefficient"
+
+    if model_type == "random_forest":
+        importances = model.feature_importances_.reshape(-1)
+        by_feature = {name: float(importances[idx]) for idx, name in enumerate(feature_names)}
+        return 0.0, by_feature, "importance"
+
+    raise ValueError(f"Unsupported router model type in effect extraction: {model_type!r}")
+
+
+def serialize_router_model(model_bundle):
+    """Serialize a trained router model bundle for fold cache reuse."""
+    model_type = model_bundle["model_type"]
+    model = model_bundle["model"]
+
+    if model_type == "logistic":
+        return {
+            "model_type": model_type,
+            "fit_intercept": bool(model.linear.bias is not None),
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        }
+
+    if model_type == "random_forest":
+        return {
+            "model_type": model_type,
+            "estimator": model,
+        }
+
+    raise ValueError(f"Unsupported router model type in serialization: {model_type!r}")
+
+
+def deserialize_router_model(serialized, cfg, device):
+    """Deserialize fold-cached router model bundle."""
+    model_type = serialized.get("model_type")
+    if model_type == "logistic":
+        model = LogisticRegressor(
+            in_features=len(FEATURE_NAMES),
+            fit_intercept=bool(serialized.get("fit_intercept", True)),
+        ).to(device)
+        model.load_state_dict(serialized["state_dict"])
+        model.eval()
+        return {"model_type": model_type, "model": model}
+
+    if model_type == "random_forest":
+        return {"model_type": model_type, "model": serialized["estimator"]}
+
+    raise ValueError(f"Unsupported router model type in deserialization: {model_type!r}")
+
+
+def save_router_metadata_json(cfg, model_type, output_path):
+    """Save selected router model metadata for reproducibility."""
+    payload = {"model_type": model_type}
+    if model_type == "random_forest":
+        payload["random_forest"] = get_random_forest_config(cfg)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
 def save_per_dataset_results(rows, output_csv):
     """Save per-dataset benchmark results as CSV."""
     with open(output_csv, "w", encoding="utf-8", newline="") as f:
@@ -891,12 +1022,20 @@ def save_macro_summary(rows, output_csv):
 
 
 def save_fold_coefficients_csv(rows, output_csv):
-    """Save one readable coefficient table across all LOODO folds."""
+    """Save one readable router-effects table across all LOODO folds."""
     with open(output_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["heldout_dataset", "term", "coefficient"])
+        writer.writerow(["heldout_dataset", "model_type", "value_type", "term", "coefficient"])
         for row in rows:
-            writer.writerow([row["heldout_dataset"], row["term"], f"{row['coefficient']:.12f}"])
+            writer.writerow(
+                [
+                    row["heldout_dataset"],
+                    row["model_type"],
+                    row["value_type"],
+                    row["term"],
+                    f"{row['coefficient']:.12f}",
+                ]
+            )
 
 
 def save_fold_normalization_stats_csv(rows, output_csv):
@@ -1029,12 +1168,21 @@ def save_within_macro_summary(rows, output_csv):
 
 
 def save_within_coefficients_csv(rows, output_csv):
-    """Save per-dataset per-repeat logistic coefficients."""
+    """Save per-dataset per-repeat router effects."""
     with open(output_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["dataset", "repeat", "term", "coefficient"])
+        writer.writerow(["dataset", "repeat", "model_type", "value_type", "term", "coefficient"])
         for row in rows:
-            writer.writerow([row["dataset"], row["repeat"], row["term"], f"{row['coefficient']:.12f}"])
+            writer.writerow(
+                [
+                    row["dataset"],
+                    row["repeat"],
+                    row["model_type"],
+                    row["value_type"],
+                    row["term"],
+                    f"{row['coefficient']:.12f}",
+                ]
+            )
 
 
 def save_within_norm_stats_csv(rows, output_csv):
@@ -1273,6 +1421,8 @@ def run_within_dataset_benchmark(
     if n_repeats <= 0:
         raise ValueError(f"within_dataset_evaluation.n_repeats must be > 0, got {n_repeats}.")
 
+    model_type = get_router_model_type(cfg)
+
     results_root = get_config_path(cfg, "results_folder", "data/results")
     benchmark_dir = os.path.join(results_root, short_model, "within_dataset_routing")
     plots_dir = os.path.join(benchmark_dir, "plots")
@@ -1284,6 +1434,9 @@ def run_within_dataset_benchmark(
         f"Within-dataset config: train_fraction={train_fraction}, "
         f"n_repeats={n_repeats}, shuffle={shuffle}"
     )
+    print(f"Router model type: {model_type}")
+    if model_type == "random_forest":
+        print(f"RandomForest params: {get_random_forest_config(cfg)}")
 
     per_repeat_rows = []
     alpha_rows = []
@@ -1346,13 +1499,19 @@ def run_within_dataset_benchmark(
                 f"  Repeat {repeat}/{n_repeats} | "
                 f"train={len(train_rows):,}, test={len(test_rows):,}, seed={repeat_seed}"
             )
-            model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
+            model_bundle = train_router_model(X_train, y_train, cfg, device)
 
-            intercept, coef_by_feature = extract_model_coefficients(model, FEATURE_NAMES)
+            intercept, coef_by_feature, value_type = extract_router_importance_or_coefficients(
+                model_bundle,
+                FEATURE_NAMES,
+                cfg,
+            )
             coefficient_rows.append(
                 {
                     "dataset": dataset_name,
                     "repeat": repeat,
+                    "model_type": model_type,
+                    "value_type": value_type,
                     "term": "intercept",
                     "coefficient": intercept,
                 }
@@ -1362,12 +1521,14 @@ def run_within_dataset_benchmark(
                     {
                         "dataset": dataset_name,
                         "repeat": repeat,
+                        "model_type": model_type,
+                        "value_type": value_type,
                         "term": feat_name,
                         "coefficient": coef_by_feature[feat_name],
                     }
                 )
 
-            alphas = predict_alpha(model, X_test, device)
+            alphas = predict_router_alpha(model_bundle, X_test, cfg, device)
             alpha_map = {qid: float(alpha) for qid, alpha in zip(test_qids, alphas)}
             alpha_rows.extend(
                 {
@@ -1413,9 +1574,10 @@ def run_within_dataset_benchmark(
     per_dataset_summary_csv = os.path.join(benchmark_dir, "per_dataset_summary.csv")
     macro_csv = os.path.join(benchmark_dir, "macro_summary.csv")
     alpha_csv = os.path.join(benchmark_dir, "predicted_alphas.csv")
-    coefficients_csv = os.path.join(benchmark_dir, "coefficients.csv")
+    model_effects_csv = os.path.join(benchmark_dir, "model_effects.csv")
     norm_csv = os.path.join(benchmark_dir, "normalization_stats.csv")
     alpha_summary_csv = os.path.join(benchmark_dir, "alpha_summary.csv")
+    router_metadata_json = os.path.join(benchmark_dir, "router_model_metadata.json")
 
     save_within_per_repeat_results(per_repeat_rows, per_repeat_csv)
     summary_rows = summarize_within_dataset_rows(per_repeat_rows)
@@ -1428,10 +1590,11 @@ def run_within_dataset_benchmark(
         for row in alpha_rows:
             writer.writerow([row["dataset"], row["repeat"], row["query_id"], f"{row['alpha']:.6f}"])
 
-    save_within_coefficients_csv(coefficient_rows, coefficients_csv)
+    save_within_coefficients_csv(coefficient_rows, model_effects_csv)
     save_within_norm_stats_csv(norm_rows, norm_csv)
     save_within_alpha_summary(alpha_rows, alpha_summary_csv)
     save_within_dataset_plots(summary_rows, alpha_rows, plots_dir)
+    save_router_metadata_json(cfg, model_type, router_metadata_json)
 
     print("\n" + "=" * 72)
     print("WITHIN-DATASET supervised routing benchmark completed.")
@@ -1441,9 +1604,10 @@ def run_within_dataset_benchmark(
     print(f"Per-dataset summary CSV       : {per_dataset_summary_csv}")
     print(f"Macro summary CSV             : {macro_csv}")
     print(f"Predicted alphas CSV          : {alpha_csv}")
-    print(f"Coefficients CSV              : {coefficients_csv}")
+    print(f"Model effects CSV            : {model_effects_csv}")
     print(f"Normalization stats CSV       : {norm_csv}")
     print(f"Alpha summary CSV             : {alpha_summary_csv}")
+    print(f"Router metadata JSON          : {router_metadata_json}")
     print(f"Plots directory               : {plots_dir}")
     print("=" * 72)
 
@@ -1474,6 +1638,7 @@ def main():
     device = torch.device("cuda" if (use_cuda and torch.cuda.is_available()) else "cpu")
 
     model_name = cfg["embeddings"]["model_name"]
+    model_type = get_router_model_type(cfg)
     short_model = model_short_name(model_name)
     ndcg_k = int(cfg["benchmark"].get("ndcg_k", 10))
     rrf_k = int(cfg["benchmark"].get("rrf", {}).get("k", 60))
@@ -1496,6 +1661,9 @@ def main():
     print(f"Model  : {model_name}")
     print(f"Datasets ({len(datasets)}): {', '.join(datasets)}")
     print(f"Evaluation mode: {eval_mode}")
+    print(f"Router model type: {model_type}")
+    if model_type == "random_forest":
+        print(f"RandomForest params: {get_random_forest_config(cfg)}")
     print("\n[1/4] Loading cached retrieval artifacts per dataset ...")
 
     dataset_cache_map = {}
@@ -1593,6 +1761,8 @@ def main():
             "train_datasets": train_datasets,
             "feature_names": FEATURE_NAMES,
             "bm25": u.get_bm25_params(cfg),
+            "model_type": model_type,
+            "random_forest": get_random_forest_config(cfg) if model_type == "random_forest" else None,
             "training_cfg": {
                 "regularization": routing_cfg.get("regularization", "l2"),
                 "C": routing_cfg.get("C", 1.0),
@@ -1610,45 +1780,48 @@ def main():
         fold_signature = hashlib.md5(
             json.dumps(fold_signature_payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        fold_model_path = os.path.join(model_cache_dir, f"fold_{heldout}.pt")
+        fold_model_path = os.path.join(model_cache_dir, f"fold_{heldout}.pkl")
 
-        model = LogisticRegressor(
-            in_features=len(FEATURE_NAMES),
-            fit_intercept=bool(routing_cfg.get("fit_intercept", True)),
-        ).to(device)
+        model_bundle = None
 
         if file_exists(fold_model_path):
-            payload = torch.load(fold_model_path, map_location=device, weights_only=False)
+            payload = load_pickle(fold_model_path)
             if payload.get("signature") == fold_signature:
                 print("  Reusing cached fold model.")
-                model.load_state_dict(payload["state_dict"])
+                model_bundle = deserialize_router_model(payload["model"], cfg, device)
             else:
                 print("  Fold cache exists but signature changed; retraining.")
-                model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
-                torch.save(
+                model_bundle = train_router_model(X_train, y_train, cfg, device)
+                save_pickle(
                     {
                         "signature": fold_signature,
                         "signature_payload": fold_signature_payload,
-                        "state_dict": model.state_dict(),
+                        "model": serialize_router_model(model_bundle),
                     },
                     fold_model_path,
                 )
         else:
             print("  Training fold model from scratch ...")
-            model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
-            torch.save(
+            model_bundle = train_router_model(X_train, y_train, cfg, device)
+            save_pickle(
                 {
                     "signature": fold_signature,
                     "signature_payload": fold_signature_payload,
-                    "state_dict": model.state_dict(),
+                    "model": serialize_router_model(model_bundle),
                 },
                 fold_model_path,
             )
 
-        intercept, coef_by_feature = extract_model_coefficients(model, FEATURE_NAMES)
+        intercept, coef_by_feature, value_type = extract_router_importance_or_coefficients(
+            model_bundle,
+            FEATURE_NAMES,
+            cfg,
+        )
         coefficient_rows.append(
             {
                 "heldout_dataset": heldout,
+                "model_type": model_type,
+                "value_type": value_type,
                 "term": "intercept",
                 "coefficient": intercept,
             }
@@ -1657,12 +1830,14 @@ def main():
             coefficient_rows.append(
                 {
                     "heldout_dataset": heldout,
+                    "model_type": model_type,
+                    "value_type": value_type,
                     "term": feat_name,
                     "coefficient": coef_by_feature[feat_name],
                 }
             )
 
-        alphas = predict_alpha(model, X_test, device)
+        alphas = predict_router_alpha(model_bundle, X_test, cfg, device)
         alpha_map = {qid: float(alpha) for qid, alpha in zip(test_qids, alphas)}
         alpha_rows.extend(
             {"dataset": heldout, "query_id": qid, "alpha": float(alpha)}
@@ -1704,13 +1879,15 @@ def main():
     per_dataset_csv = os.path.join(benchmark_dir, "per_dataset_results.csv")
     macro_csv = os.path.join(benchmark_dir, "loodo_macro_summary.csv")
     alpha_csv = os.path.join(benchmark_dir, "predicted_alphas.csv")
-    fold_coefficients_csv = os.path.join(benchmark_dir, "fold_logistic_coefficients.csv")
+    fold_coefficients_csv = os.path.join(benchmark_dir, "fold_model_effects.csv")
     fold_norm_csv = os.path.join(benchmark_dir, "fold_normalization_stats.csv")
+    router_metadata_json = os.path.join(benchmark_dir, "router_model_metadata.json")
 
     save_per_dataset_results(fold_results, per_dataset_csv)
     save_macro_summary(fold_results, macro_csv)
     save_fold_coefficients_csv(coefficient_rows, fold_coefficients_csv)
     save_fold_normalization_stats_csv(fold_norm_rows, fold_norm_csv)
+    save_router_metadata_json(cfg, model_type, router_metadata_json)
 
     with open(alpha_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -1728,8 +1905,9 @@ def main():
     print(f"Per-dataset results CSV      : {per_dataset_csv}")
     print(f"Macro summary CSV            : {macro_csv}")
     print(f"Predicted alphas CSV         : {alpha_csv}")
-    print(f"Fold coefficients CSV        : {fold_coefficients_csv}")
+    print(f"Fold model effects CSV      : {fold_coefficients_csv}")
     print(f"Fold normalization stats CSV : {fold_norm_csv}")
+    print(f"Router metadata JSON         : {router_metadata_json}")
     print(f"Plots directory              : {plots_dir}")
     print("=" * 72)
 

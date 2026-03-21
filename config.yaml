@@ -132,6 +132,8 @@ supervised_routing:
   feature_workers: 8
 
   # Model/training setup
+  model_type: "logistic"
+  model_type: "random_forest"
   regularization: "l2"
   C: 1.0
   fit_intercept: true
@@ -143,3 +145,16 @@ supervised_routing:
   early_stopping_min_delta: 1.0e-6
   seed: 42
   use_cuda_if_available: true
+
+# ------------------------------------------------------------
+# Random Forest router (used when supervised_routing.model_type=random_forest)
+# ------------------------------------------------------------
+random_forest:
+  n_estimators: 300
+  max_depth: 8
+  min_samples_split: 8
+  min_samples_leaf: 4
+  max_features: "sqrt"
+  bootstrap: true
+  n_jobs: -1
+  random_state: 42

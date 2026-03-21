@@ -32,10 +32,12 @@ from src.retrieve_and_evaluate import (
     dataset_seed_offset,
     ensure_retrieval_results_cached,
     evaluate_benchmark_methods_for_qids,
-    predict_alpha,
+    get_random_forest_config,
+    get_router_model_type,
+    predict_router_alpha,
     set_global_seed,
     split_rows_train_test,
-    train_logistic_regression_pytorch,
+    train_router_model,
 )
 from src.utils import ensure_dir, get_config_path, load_config, model_short_name
 
@@ -129,8 +131,8 @@ def _run_loodo_for_features(
 
         X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
-        model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
-        alphas = predict_alpha(model, X_test, device)
+        model_bundle = train_router_model(X_train, y_train, cfg, device)
+        alphas = predict_router_alpha(model_bundle, X_test, cfg, device)
         alpha_map = {qid: float(alpha) for qid, alpha in zip(test_qids, alphas)}
 
         ds_cache = dataset_cache_map[heldout]
@@ -204,8 +206,8 @@ def _run_within_dataset_for_features(
 
             X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
-            model = train_logistic_regression_pytorch(X_train, y_train, cfg, device)
-            alphas = predict_alpha(model, X_test, device)
+            model_bundle = train_router_model(X_train, y_train, cfg, device)
+            alphas = predict_router_alpha(model_bundle, X_test, cfg, device)
             alpha_map = {qid: float(alpha) for qid, alpha in zip(test_qids, alphas)}
 
             ds_cache = dataset_cache_map[dataset_name]
@@ -351,6 +353,7 @@ def main():
     device = torch.device("cuda" if (use_cuda and torch.cuda.is_available()) else "cpu")
 
     model_name = cfg["embeddings"]["model_name"]
+    model_type = get_router_model_type(cfg)
     short_model = model_short_name(model_name)
     ndcg_k = int(cfg["benchmark"].get("ndcg_k", 10))
     rrf_k = int(cfg["benchmark"].get("rrf", {}).get("k", 60))
@@ -365,6 +368,9 @@ def main():
     print(f"Model  : {model_name}")
     print(f"Datasets ({len(datasets)}): {', '.join(datasets)}")
     print(f"Evaluation mode: {eval_mode}")
+    print(f"Router model type: {model_type}")
+    if model_type == "random_forest":
+        print(f"RandomForest params: {get_random_forest_config(cfg)}")
 
     print("\n[1/3] Loading cached retrieval artifacts per dataset ...")
     dataset_cache_map = {}
