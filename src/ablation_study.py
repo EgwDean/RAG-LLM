@@ -61,15 +61,24 @@ def filter_rows_by_features(rows, selected_features):
     return filtered
 
 
+def ordered_feature_subset(selected_features):
+    """Return selected features ordered as they appear in FEATURE_NAMES."""
+    ordered_features = [f for f in FEATURE_NAMES if f in selected_features]
+    if not ordered_features:
+        raise ValueError("No features selected for ablation.")
+    return ordered_features
+
+
 def rows_to_matrix_subset(rows, selected_features):
     """Convert rows to feature matrix using selected feature subset."""
+    ordered_features = ordered_feature_subset(selected_features)
     qids = [r["query_id"] for r in rows]
     X = np.asarray(
-        [[float(r["features"][name]) for name in selected_features] for r in rows],
+        [[float(r["features"][name]) for name in ordered_features] for r in rows],
         dtype=np.float32,
     )
     y = np.asarray([float(r["soft_label"]) for r in rows], dtype=np.float32)
-    return X, y, qids
+    return X, y, qids, ordered_features
 
 
 def _validate_feature_setup():
@@ -112,8 +121,8 @@ def _run_loodo_for_features(
         if not train_rows or not test_rows:
             raise ValueError(f"Fold {heldout}: train/test rows are empty.")
 
-        X_train_raw, y_train, _ = rows_to_matrix_subset(train_rows, selected_features)
-        X_test_raw, _, test_qids = rows_to_matrix_subset(test_rows, selected_features)
+        X_train_raw, y_train, _, _ = rows_to_matrix_subset(train_rows, selected_features)
+        X_test_raw, _, test_qids, _ = rows_to_matrix_subset(test_rows, selected_features)
 
         train_mean, train_std = compute_zscore_stats(X_train_raw)
         X_train = apply_zscore(X_train_raw, train_mean, train_std)
@@ -187,8 +196,8 @@ def _run_within_dataset_for_features(
                 shuffle=shuffle,
             )
 
-            X_train_raw, y_train, _ = rows_to_matrix_subset(train_rows, selected_features)
-            X_test_raw, _, test_qids = rows_to_matrix_subset(test_rows, selected_features)
+            X_train_raw, y_train, _, _ = rows_to_matrix_subset(train_rows, selected_features)
+            X_test_raw, _, test_qids, _ = rows_to_matrix_subset(test_rows, selected_features)
 
             train_mean, train_std = compute_zscore_stats(X_train_raw)
             X_train = apply_zscore(X_train_raw, train_mean, train_std)
@@ -387,9 +396,11 @@ def main():
         desc="Ablation experiments",
         dynamic_ncols=True,
     ):
+        ordered_features = ordered_feature_subset(selected_features)
         print(
             f"\n[ABLATION] Mode={eval_mode} | Experiment={experiment} | Group={group_name}"
         )
+        print(f"Using features (ordered): {ordered_features}")
         metrics = run_ablation_experiment(
             rows_by_dataset=rows_by_dataset,
             dataset_cache_map=dataset_cache_map,
