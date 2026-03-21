@@ -1318,8 +1318,7 @@ def run_within_dataset_benchmark(
             train_mean, train_std = compute_zscore_stats(X_train_raw)
             X_train = apply_zscore(X_train_raw, train_mean, train_std)
 
-            test_mean, test_std = compute_zscore_stats(X_test_raw)
-            X_test = apply_zscore(X_test_raw, test_mean, test_std)
+            X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
             for feat_idx, feat_name in enumerate(FEATURE_NAMES):
                 norm_rows.append(
@@ -1338,8 +1337,8 @@ def run_within_dataset_benchmark(
                         "repeat": repeat,
                         "split": "test",
                         "feature": feat_name,
-                        "mean": float(test_mean[feat_idx]),
-                        "std": float(test_std[feat_idx]),
+                        "mean": float(train_mean[feat_idx]),
+                        "std": float(train_std[feat_idx]),
                     }
                 )
 
@@ -1566,9 +1565,8 @@ def main():
         train_mean, train_std = compute_zscore_stats(X_train_raw)
         X_train = apply_zscore(X_train_raw, train_mean, train_std)
 
-        # Held-out dataset normalized independently using unlabeled test features.
-        test_mean, test_std = compute_zscore_stats(X_test_raw)
-        X_test = apply_zscore(X_test_raw, test_mean, test_std)
+        # Held-out dataset uses training-fold normalization statistics.
+        X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
         for feat_idx, feat_name in enumerate(FEATURE_NAMES):
             fold_norm_rows.append(
@@ -1585,8 +1583,8 @@ def main():
                     "heldout_dataset": heldout,
                     "split": "test",
                     "feature": feat_name,
-                    "mean": float(test_mean[feat_idx]),
-                    "std": float(test_std[feat_idx]),
+                    "mean": float(train_mean[feat_idx]),
+                    "std": float(train_std[feat_idx]),
                 }
             )
 
