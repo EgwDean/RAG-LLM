@@ -62,6 +62,7 @@ from src.feature_inventory import (
     CURRENT_FEATURES,
     EXPANDED_FEATURES,
     FEATURE_SCHEMA_VERSION,
+    get_selected_feature_names,
 )
 
 
@@ -215,12 +216,16 @@ def apply_dynamic_wrrf(bm25_results, dense_results, alpha_map, rrf_k):
         de_pairs = dense_results.get(qid, [])
         bm_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(bm_pairs, start=1)}
         de_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(de_pairs, start=1)}
+        # Missing docs are treated as just-below-tail in each ranking.
+        # This avoids an arbitrary global constant and keeps query-local calibration.
+        bm_missing_rank = len(bm_pairs) + 1
+        de_missing_rank = len(de_pairs) + 1
 
         docs = set(bm_ranks.keys()) | set(de_ranks.keys())
         q_scores = {}
         for doc_id in docs:
-            bm_rank = bm_ranks.get(doc_id, 1000)
-            de_rank = de_ranks.get(doc_id, 1000)
+            bm_rank = bm_ranks.get(doc_id, bm_missing_rank)
+            de_rank = de_ranks.get(doc_id, de_missing_rank)
             q_scores[doc_id] = (
                 alpha * (1.0 / (rrf_k + bm_rank))
                 + (1.0 - alpha) * (1.0 / (rrf_k + de_rank))
@@ -658,6 +663,29 @@ def rows_to_matrix(rows):
     )
     y = np.asarray([float(r["soft_label"]) for r in rows], dtype=np.float32)
     return X, y, qids
+
+
+def rows_to_matrix_with_features(rows, feature_names):
+    """Convert feature rows to X matrix, y vector, and qid list for a selected subset."""
+    qids = [r["query_id"] for r in rows]
+    X = np.asarray(
+        [[float(r["features"][name]) for name in feature_names] for r in rows],
+        dtype=np.float32,
+    )
+    y = np.asarray([float(r["soft_label"]) for r in rows], dtype=np.float32)
+    return X, y, qids
+
+
+def resolve_training_feature_names(cfg):
+    """Resolve model-specific training feature names.
+
+    XGBoost training/optimization is locked to the selected CORE_PLUS_QUERY set.
+    Other models retain the backward-compatible default feature set.
+    """
+    model_type = get_router_model_type(cfg)
+    if model_type == "xgboost":
+        return get_selected_feature_names()
+    return list(FEATURE_NAMES)
 
 
 def split_rows_train_test(rows, train_fraction, repeat_seed, shuffle=True):
@@ -1559,6 +1587,7 @@ def run_within_dataset_benchmark(
         raise ValueError(f"within_dataset_evaluation.n_repeats must be > 0, got {n_repeats}.")
 
     model_type = get_router_model_type(cfg)
+    training_feature_names = resolve_training_feature_names(cfg)
 
     results_root = get_config_path(cfg, "results_folder", "data/results")
     benchmark_dir = os.path.join(results_root, short_model, "within_dataset_routing")
@@ -1572,6 +1601,9 @@ def run_within_dataset_benchmark(
         f"n_repeats={n_repeats}, shuffle={shuffle}"
     )
     print(f"Router model type: {model_type}")
+    if model_type == "xgboost":
+        print("Using selected feature set: CORE_PLUS_QUERY")
+        print(f"Features: {training_feature_names}")
     if model_type == "random_forest":
         print(f"RandomForest params: {get_random_forest_config(cfg)}")
     if model_type == "xgboost":
@@ -1612,15 +1644,15 @@ def run_within_dataset_benchmark(
                 shuffle=shuffle,
             )
 
-            X_train_raw, y_train, _ = rows_to_matrix(train_rows)
-            X_test_raw, _, test_qids = rows_to_matrix(test_rows)
+            X_train_raw, y_train, _ = rows_to_matrix_with_features(train_rows, training_feature_names)
+            X_test_raw, _, test_qids = rows_to_matrix_with_features(test_rows, training_feature_names)
 
             train_mean, train_std = compute_zscore_stats(X_train_raw)
             X_train = apply_zscore(X_train_raw, train_mean, train_std)
 
             X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
-            for feat_idx, feat_name in enumerate(FEATURE_NAMES):
+            for feat_idx, feat_name in enumerate(training_feature_names):
                 norm_rows.append(
                     {
                         "dataset": dataset_name,
@@ -1650,7 +1682,7 @@ def run_within_dataset_benchmark(
 
             intercept, coef_by_feature, value_type = extract_router_importance_or_coefficients(
                 model_bundle,
-                FEATURE_NAMES,
+                training_feature_names,
                 cfg,
             )
             coefficient_rows.append(
@@ -1663,7 +1695,7 @@ def run_within_dataset_benchmark(
                     "coefficient": intercept,
                 }
             )
-            for feat_name in FEATURE_NAMES:
+            for feat_name in training_feature_names:
                 coefficient_rows.append(
                     {
                         "dataset": dataset_name,
@@ -1809,6 +1841,12 @@ def main():
     print(f"Datasets ({len(datasets)}): {', '.join(datasets)}")
     print(f"Evaluation mode: {eval_mode}")
     print(f"Router model type: {model_type}")
+    if model_type == "xgboost":
+        training_feature_names = resolve_training_feature_names(cfg)
+        print("Using selected feature set: CORE_PLUS_QUERY")
+        print(f"Features: {training_feature_names}")
+    else:
+        training_feature_names = resolve_training_feature_names(cfg)
     if model_type == "random_forest":
         print(f"RandomForest params: {get_random_forest_config(cfg)}")
     if model_type == "xgboost":
@@ -1883,8 +1921,8 @@ def main():
         print(f"Train queries    : {len(train_rows):,} | Test queries: {len(test_rows):,}")
         print(f"{'-' * 68}")
 
-        X_train_raw, y_train, _ = rows_to_matrix(train_rows)
-        X_test_raw, _, test_qids = rows_to_matrix(test_rows)
+        X_train_raw, y_train, _ = rows_to_matrix_with_features(train_rows, training_feature_names)
+        X_test_raw, _, test_qids = rows_to_matrix_with_features(test_rows, training_feature_names)
 
         # Train split normalized by training-fold statistics.
         train_mean, train_std = compute_zscore_stats(X_train_raw)
@@ -1893,7 +1931,7 @@ def main():
         # Held-out dataset uses training-fold normalization statistics.
         X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
-        for feat_idx, feat_name in enumerate(FEATURE_NAMES):
+        for feat_idx, feat_name in enumerate(training_feature_names):
             fold_norm_rows.append(
                 {
                     "heldout_dataset": heldout,
@@ -1916,7 +1954,7 @@ def main():
         fold_signature_payload = {
             "heldout": heldout,
             "train_datasets": train_datasets,
-            "feature_names": FEATURE_NAMES,
+            "feature_names": training_feature_names,
             "bm25": u.get_bm25_params(cfg),
             "model_type": model_type,
             "random_forest": get_random_forest_config(cfg) if model_type == "random_forest" else None,
@@ -1973,7 +2011,7 @@ def main():
 
         intercept, coef_by_feature, value_type = extract_router_importance_or_coefficients(
             model_bundle,
-            FEATURE_NAMES,
+            training_feature_names,
             cfg,
         )
         coefficient_rows.append(
@@ -1985,7 +2023,7 @@ def main():
                 "coefficient": intercept,
             }
         )
-        for feat_name in FEATURE_NAMES:
+        for feat_name in training_feature_names:
             coefficient_rows.append(
                 {
                     "heldout_dataset": heldout,

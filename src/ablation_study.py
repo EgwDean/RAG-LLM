@@ -381,6 +381,20 @@ def save_ablation_results(results, output_csv):
                 "dynamic_wrrf_ndcg",
             ]
         )
+        for row in results:
+            writer.writerow(
+                [
+                    row["experiment"],
+                    row["feature_set"],
+                    row["model_type"],
+                    row["feature_inventory"],
+                    row["evaluation_mode"],
+                    f"{row['dense']:.6f}",
+                    f"{row['sparse']:.6f}",
+                    f"{row['static']:.6f}",
+                    f"{row['dynamic']:.6f}",
+                ]
+            )
 
 
 def save_candidate_feature_set_results(results, output_csv):
@@ -536,6 +550,12 @@ def main():
         raise ValueError(
             f"Unsupported ablation.mode={ablation_mode!r}. "
             "Use 'group_ablation' or 'candidate_feature_sets'."
+        )
+
+    if ablation_mode == "candidate_feature_sets" and selected_inventory != "expanded":
+        raise ValueError(
+            "ablation.mode='candidate_feature_sets' requires feature_inventory='expanded' "
+            "because CORE/CORE_PLUS_QUERY rely on the legacy_topscore group."
         )
 
     feature_names, feature_groups = get_feature_inventory(selected_inventory)

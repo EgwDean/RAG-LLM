@@ -35,7 +35,6 @@ os.chdir(PROJECT_ROOT)
 
 import src.utils as u
 from src.retrieve_and_evaluate import (
-    FEATURE_NAMES,
     apply_zscore,
     build_or_load_query_feature_cache,
     compute_zscore_stats,
@@ -47,6 +46,7 @@ from src.retrieve_and_evaluate import (
     split_rows_train_test,
     train_router_model,
 )
+from src.feature_inventory import get_selected_feature_names
 from src.utils import ensure_dir, get_config_path, load_config, model_short_name
 
 
@@ -410,7 +410,9 @@ def optimize_xgboost(cfg, mode):
     for ds in datasets:
         rows_by_dataset[ds].sort(key=lambda r: r["query_id"])
 
-    feature_names = list(FEATURE_NAMES)
+    feature_names = get_selected_feature_names()
+    print("Using selected feature set: CORE_PLUS_QUERY")
+    print(f"Features: {feature_names}")
 
     print("\n[3/4] Running XGBoost search ...")
     trial_rows = []

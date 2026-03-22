@@ -42,6 +42,9 @@ FEATURE_GROUPS_EXPANDED = {
     "legacy_topscore": ["top_dense_score", "top_sparse_score", "top_score_gap"],
 }
 
+# Final selected set for XGBoost training/optimization.
+SELECTED_FEATURE_GROUPS = ["overlap", "confidence", "legacy_topscore", "query"]
+
 # Keep this aligned with feature definition changes to force cache refresh when needed.
 FEATURE_SCHEMA_VERSION = "routing_features_v2_expanded_legacy_topscore"
 
@@ -54,6 +57,35 @@ def get_feature_inventory(inventory_name):
     if key == "expanded":
         return list(EXPANDED_FEATURES), dict(FEATURE_GROUPS_EXPANDED)
     raise ValueError(f"Unsupported feature inventory: {inventory_name!r}.")
+
+
+def resolve_feature_names_from_groups(feature_names, feature_groups, selected_groups):
+    """Resolve deterministic feature names from a group union."""
+    missing = [g for g in selected_groups if g not in feature_groups]
+    if missing:
+        raise ValueError(
+            "Selected feature groups are missing from feature_groups: "
+            f"{missing}"
+        )
+
+    union = set()
+    for group_name in selected_groups:
+        union.update(feature_groups[group_name])
+
+    resolved = [name for name in feature_names if name in union]
+    if not resolved:
+        raise ValueError("Resolved selected feature set is empty.")
+    return resolved
+
+
+def get_selected_feature_names():
+    """Return final selected CORE_PLUS_QUERY feature names in deterministic order."""
+    expanded_features, expanded_groups = get_feature_inventory("expanded")
+    return resolve_feature_names_from_groups(
+        expanded_features,
+        expanded_groups,
+        SELECTED_FEATURE_GROUPS,
+    )
 
 
 def inventory_membership(feature_name):
