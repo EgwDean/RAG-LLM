@@ -876,10 +876,33 @@ def get_random_forest_config(cfg):
     }
 
 
-def get_xgboost_config(cfg):
-    """Return XGBoost hyperparameters with reproducible defaults."""
+def resolve_xgboost_params(cfg, dataset_name=None, optimization_mode=None):
+    """Resolve XGBoost params with optional dataset/mode-specific overrides.
+
+    Resolution order:
+      1) Global defaults from cfg['xgboost']
+      2) Optional overrides from cfg['xgboost_per_dataset'][mode][dataset_name]
+    """
+    base = dict(cfg.get("xgboost", {}) or {})
+
+    per_dataset_cfg = cfg.get("xgboost_per_dataset", {}) or {}
+    if dataset_name and optimization_mode:
+        mode_cfg = per_dataset_cfg.get(str(optimization_mode), {}) or {}
+        dataset_override = mode_cfg.get(str(dataset_name), {}) or {}
+        if dataset_override:
+            base.update(dataset_override)
+
+    return base
+
+
+def get_xgboost_config(cfg, dataset_name=None, optimization_mode=None):
+    """Return resolved XGBoost hyperparameters with reproducible defaults."""
     routing_cfg = cfg.get("supervised_routing", {})
-    xgb_cfg = cfg.get("xgboost", {})
+    xgb_cfg = resolve_xgboost_params(
+        cfg,
+        dataset_name=dataset_name,
+        optimization_mode=optimization_mode,
+    )
     return {
         "n_estimators": int(xgb_cfg.get("n_estimators", 300)),
         "max_depth": int(xgb_cfg.get("max_depth", 6)),

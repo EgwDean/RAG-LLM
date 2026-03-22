@@ -173,3 +173,29 @@ xgboost:
   objective: "reg:squarederror"
   n_jobs: -1
   random_state: 42
+
+# ------------------------------------------------------------
+# XGBoost router hyperparameter optimization
+# Used by: python src/optimize_xgboost.py
+# ------------------------------------------------------------
+xgboost_optimization:
+  mode: "within_dataset"   # within_dataset | loodo
+  search_type: "grid"      # currently supported: grid
+  max_configs: null         # null => evaluate all generated combinations
+  param_grid:
+    n_estimators: [100, 200, 300, 500]
+    max_depth: [3, 4, 6, 8]
+    learning_rate: [0.03, 0.05, 0.1]
+    subsample: [0.8, 1.0]
+    colsample_bytree: [0.8, 1.0]
+    min_child_weight: [1, 3, 5]
+    reg_lambda: [1.0, 3.0, 5.0]
+    reg_alpha: [0.0, 0.1]
+
+# ------------------------------------------------------------
+# Optional dataset-specific XGBoost router overrides
+# If not provided for a dataset/mode, global xgboost defaults are used.
+# ------------------------------------------------------------
+xgboost_per_dataset:
+  within_dataset: {}
+  loodo: {}
