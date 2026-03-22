@@ -11,8 +11,8 @@ This script reuses preprocessing artifacts and retrieval caches to benchmark:
 Important methodological points:
   - No oracle search on the held-out dataset.
   - Soft labels are query-level targets in [0, 1], not hard classes.
-        - Supports logistic regression (PyTorch), random forest regression (scikit-learn),
-            and XGBoost regression (xgboost).
+    - Supports logistic regression (PyTorch), random forest, XGBoost,
+        and SVR-RBF (scikit-learn).
 """
 
 import argparse
@@ -945,6 +945,38 @@ def _create_xgboost_regressor(cfg):
     return XGBRegressor(**xgb_params)
 
 
+def get_svr_rbf_config():
+    """Return fixed default configuration for SVR with RBF kernel."""
+    return {
+        "kernel": "rbf",
+        "C": 10.0,
+        "gamma": "scale",
+        "epsilon": 0.05,
+    }
+
+
+def train_svr_rbf(X_train, y_train, cfg):
+    """Train fixed-parameter SVR-RBF on normalized query features."""
+    try:
+        from sklearn.svm import SVR
+    except ImportError as exc:
+        raise RuntimeError(
+            "SVR routing requires scikit-learn. Install it (e.g. pip install scikit-learn) "
+            "or switch supervised_routing.model_type to another model."
+        ) from exc
+
+    params = get_svr_rbf_config()
+    model = SVR(**params)
+    model.fit(X_train, y_train)
+    return model
+
+
+def predict_alpha_svr(model, X):
+    """Predict per-query alpha in [0, 1] using trained SVR-RBF."""
+    pred = model.predict(X)
+    return np.clip(pred, 0.0, 1.0).astype(np.float32)
+
+
 def train_router_model(X_train, y_train, cfg, device):
     """Train selected router model and return a model bundle."""
     model_type = get_router_model_type(cfg)
@@ -959,9 +991,12 @@ def train_router_model(X_train, y_train, cfg, device):
         model = _create_xgboost_regressor(cfg)
         model.fit(X_train, y_train)
         return {"model_type": model_type, "model": model}
+    if model_type == "svr_rbf":
+        model = train_svr_rbf(X_train, y_train, cfg)
+        return {"model_type": model_type, "model": model}
     raise ValueError(
         f"Unsupported supervised_routing.model_type={model_type!r}. "
-        "Use 'logistic', 'random_forest', or 'xgboost'."
+        "Use 'logistic', 'random_forest', 'xgboost', or 'svr_rbf'."
     )
 
 
@@ -978,6 +1013,8 @@ def predict_router_alpha(model_bundle, X, cfg, device):
     if model_type == "xgboost":
         pred = model.predict(X)
         return np.clip(pred, 0.0, 1.0).astype(np.float32)
+    if model_type == "svr_rbf":
+        return predict_alpha_svr(model, X)
 
     raise ValueError(f"Unsupported router model type in prediction: {model_type!r}")
 
@@ -1000,6 +1037,11 @@ def extract_router_importance_or_coefficients(model_bundle, feature_names, cfg):
         importances = model.feature_importances_.reshape(-1)
         by_feature = {name: float(importances[idx]) for idx, name in enumerate(feature_names)}
         return 0.0, by_feature, "importance"
+
+    if model_type == "svr_rbf":
+        # Non-linear RBF SVR has no direct per-feature coefficients.
+        by_feature = {name: 0.0 for name in feature_names}
+        return 0.0, by_feature, "not_available"
 
     raise ValueError(f"Unsupported router model type in effect extraction: {model_type!r}")
 
@@ -1028,6 +1070,12 @@ def serialize_router_model(model_bundle):
             "estimator": model,
         }
 
+    if model_type == "svr_rbf":
+        return {
+            "model_type": model_type,
+            "estimator": model,
+        }
+
     raise ValueError(f"Unsupported router model type in serialization: {model_type!r}")
 
 
@@ -1049,6 +1097,9 @@ def deserialize_router_model(serialized, cfg, device):
     if model_type == "xgboost":
         return {"model_type": model_type, "model": serialized["estimator"]}
 
+    if model_type == "svr_rbf":
+        return {"model_type": model_type, "model": serialized["estimator"]}
+
     raise ValueError(f"Unsupported router model type in deserialization: {model_type!r}")
 
 
@@ -1059,6 +1110,8 @@ def save_router_metadata_json(cfg, model_type, output_path):
         payload["random_forest"] = get_random_forest_config(cfg)
     if model_type == "xgboost":
         payload["xgboost"] = get_xgboost_config(cfg)
+    if model_type == "svr_rbf":
+        payload["svr_rbf"] = get_svr_rbf_config()
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
@@ -1524,6 +1577,8 @@ def run_within_dataset_benchmark(
             f"max_depth={xgb_cfg['max_depth']}, "
             f"learning_rate={xgb_cfg['learning_rate']}"
         )
+    if model_type == "svr_rbf":
+        print("SVR params: C=10.0, gamma=scale, epsilon=0.05")
 
     per_repeat_rows = []
     alpha_rows = []
@@ -1759,6 +1814,8 @@ def main():
             f"max_depth={xgb_cfg['max_depth']}, "
             f"learning_rate={xgb_cfg['learning_rate']}"
         )
+    if model_type == "svr_rbf":
+        print("SVR params: C=10.0, gamma=scale, epsilon=0.05")
     print("\n[1/4] Loading cached retrieval artifacts per dataset ...")
 
     dataset_cache_map = {}
@@ -1859,6 +1916,7 @@ def main():
             "model_type": model_type,
             "random_forest": get_random_forest_config(cfg) if model_type == "random_forest" else None,
             "xgboost": get_xgboost_config(cfg) if model_type == "xgboost" else None,
+            "svr_rbf": get_svr_rbf_config() if model_type == "svr_rbf" else None,
             "training_cfg": {
                 "regularization": routing_cfg.get("regularization", "l2"),
                 "C": routing_cfg.get("C", 1.0),

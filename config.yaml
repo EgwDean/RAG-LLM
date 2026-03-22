@@ -132,7 +132,7 @@ supervised_routing:
   feature_workers: 8
 
   # Model/training setup
-  model_type: "xgboost"  # logistic | random_forest | xgboost
+  model_type: "svr_rbf"  # logistic | random_forest | xgboost | svr_rbf
   regularization: "l2"
   C: 1.0
   fit_intercept: true

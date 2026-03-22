@@ -34,6 +34,7 @@ from src.retrieve_and_evaluate import (
     evaluate_benchmark_methods_for_qids,
     get_random_forest_config,
     get_router_model_type,
+    get_svr_rbf_config,
     get_xgboost_config,
     predict_router_alpha,
     set_global_seed,
@@ -379,6 +380,12 @@ def main():
             f"n_estimators={xgb_cfg['n_estimators']}, "
             f"max_depth={xgb_cfg['max_depth']}, "
             f"learning_rate={xgb_cfg['learning_rate']}"
+        )
+    if model_type == "svr_rbf":
+        svr_cfg = get_svr_rbf_config()
+        print(
+            "SVR params: "
+            f"C={svr_cfg['C']}, gamma={svr_cfg['gamma']}, epsilon={svr_cfg['epsilon']}"
         )
 
     print("\n[1/3] Loading cached retrieval artifacts per dataset ...")
