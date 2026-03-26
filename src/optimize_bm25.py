@@ -102,7 +102,8 @@ def ensure_sparse_artifacts(dataset_name, cfg, k1, b, use_stemming):
     stemmer_lang = cfg["preprocessing"]["stemmer_language"]
     ds_dir, corpus_jsonl, queries_jsonl, qrels_tsv = ensure_base_dataset_exports(dataset_name, cfg)
 
-    sparse_paths = u.bm25_artifact_paths(ds_dir, k1, b, use_stemming)
+    top_k = int(cfg.get("benchmark", {}).get("top_k", 100))
+    sparse_paths = u.bm25_artifact_paths(ds_dir, k1, b, use_stemming, top_k=top_k)
 
     if not file_exists(sparse_paths["tokenized_corpus_jsonl"]):
         preprocess_corpus(

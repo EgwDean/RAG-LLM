@@ -448,7 +448,7 @@ def main():
         )
 
     print("\n[4/4] Computing tests and writing outputs ...")
-    out_dir = os.path.join(ablation_dir, "statistical_full_vs_plus11")
+    out_dir = os.path.join(ablation_dir, f"statistical_full_vs_plus{args.plus_index}")
     ensure_dir(out_dir)
 
     repeat_dataset_csv = os.path.join(out_dir, "full_vs_plus11_per_repeat_per_dataset.csv")

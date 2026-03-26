@@ -430,7 +430,7 @@ def main():
     print(f"Model: {cfg['embeddings']['model_name']}")
 
     feature_names = resolve_feature_names_for_xgboost(cfg)
-    print(f"Feature list used (CORE_PLUS_QUERY): {feature_names}")
+    print(f"Feature list used (canonical thesis set): {feature_names}")
 
     print("\n[1/3] Loading cached retrieval artifacts per dataset ...")
     dataset_cache_map = {}

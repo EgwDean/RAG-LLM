@@ -22,7 +22,7 @@ import json
 import os
 import sys
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
 import torch
 from nltk.stem.snowball import SnowballStemmer
@@ -85,7 +85,10 @@ def preprocess_corpus(
             initializer=_init_worker,
             initargs=(stemmer_lang, use_stemming),
         ) as pool:
-            pending = deque()
+            pending = {}
+            completed = {}
+            batch_idx = 0
+            next_to_write = 0
             pbar = tqdm(
                 total=total_batches,
                 desc="  Preprocessing corpus",
@@ -93,16 +96,33 @@ def preprocess_corpus(
             )
 
             for batch_ids, batch_texts in load_corpus_batch_generator(corpus_jsonl, batch_size):
-                pending.append(pool.submit(stem_batch_worker, (batch_ids, batch_texts)))
+                fut = pool.submit(stem_batch_worker, (batch_ids, batch_texts))
+                pending[fut] = batch_idx
+                batch_idx += 1
+
                 while len(pending) >= max_pending:
-                    for line in pending.popleft().result():
-                        out.write(line + "\n")
-                    pbar.update(1)
+                    done, _ = wait(set(pending.keys()), return_when=FIRST_COMPLETED)
+                    for fut_done in done:
+                        idx = pending.pop(fut_done)
+                        completed[idx] = fut_done.result()
+
+                    while next_to_write in completed:
+                        for line in completed.pop(next_to_write):
+                            out.write(line + "\n")
+                        pbar.update(1)
+                        next_to_write += 1
 
             while pending:
-                for line in pending.popleft().result():
-                    out.write(line + "\n")
-                pbar.update(1)
+                done, _ = wait(set(pending.keys()), return_when=FIRST_COMPLETED)
+                for fut_done in done:
+                    idx = pending.pop(fut_done)
+                    completed[idx] = fut_done.result()
+
+                while next_to_write in completed:
+                    for line in completed.pop(next_to_write):
+                        out.write(line + "\n")
+                    pbar.update(1)
+                    next_to_write += 1
 
             pbar.close()
 

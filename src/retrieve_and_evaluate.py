@@ -283,7 +283,6 @@ def run_dense_retrieval(
     corpus_ids,
     top_k,
     corpus_chunk_size,
-    device,
     query_chunk_size,
 ):
     """Run chunked dense retrieval and return {qid: [(doc_id, score), ...]}."""
@@ -316,12 +315,14 @@ def prepare_dataset_inputs(dataset_name, cfg):
     short_model = model_short_name(cfg["embeddings"]["model_name"])
     processed_root = get_config_path(cfg, "processed_folder", "data/processed_data")
     ds_dir = os.path.join(processed_root, short_model, dataset_name)
+    top_k = int(cfg.get("benchmark", {}).get("top_k", 100))
     bm25_params = u.get_bm25_params(cfg)
     bm25_paths = u.bm25_artifact_paths(
         ds_dir,
         bm25_params["k1"],
         bm25_params["b"],
         bm25_params["use_stemming"],
+        top_k=top_k,
     )
 
     paths = {
@@ -338,7 +339,7 @@ def prepare_dataset_inputs(dataset_name, cfg):
         "query_vectors_pt": os.path.join(ds_dir, "query_vectors.pt"),
         "query_ids_pkl": os.path.join(ds_dir, "query_ids.pkl"),
         "bm25_results_pkl": bm25_paths["bm25_results_pkl"],
-        "dense_results_pkl": os.path.join(ds_dir, "dense_results.pkl"),
+        "dense_results_pkl": os.path.join(ds_dir, f"dense_results_topk_{top_k}.pkl"),
         "bm25_signature": bm25_paths["bm25_signature"],
     }
 
@@ -382,10 +383,15 @@ def ensure_retrieval_results_cached(dataset_name, cfg, device):
 
     queries = load_queries(paths["queries_jsonl"])
 
+    bm25_results = None
     if file_exists(paths["bm25_results_pkl"]):
         print("  Loading cached BM25 retrieval results ...")
-        bm25_results = load_pickle(paths["bm25_results_pkl"])
-    else:
+        try:
+            bm25_results = load_pickle(paths["bm25_results_pkl"])
+        except Exception as exc:
+            print(f"  [WARN] Failed to load BM25 cache; rebuilding. ({type(exc).__name__}: {exc})")
+
+    if bm25_results is None:
         print("  Running BM25 retrieval and caching results ...")
         bm25 = load_pickle(paths["bm25_pkl"])
         bm25_doc_ids = load_pickle(paths["bm25_docids_pkl"])
@@ -399,10 +405,15 @@ def ensure_retrieval_results_cached(dataset_name, cfg, device):
         )
         save_pickle(bm25_results, paths["bm25_results_pkl"])
 
+    dense_results = None
     if file_exists(paths["dense_results_pkl"]):
         print("  Loading cached dense retrieval results ...")
-        dense_results = load_pickle(paths["dense_results_pkl"])
-    else:
+        try:
+            dense_results = load_pickle(paths["dense_results_pkl"])
+        except Exception as exc:
+            print(f"  [WARN] Failed to load dense cache; rebuilding. ({type(exc).__name__}: {exc})")
+
+    if dense_results is None:
         print("  Running dense retrieval and caching results ...")
         corpus_embeddings = torch.load(paths["corpus_emb_pt"], weights_only=True)
         if device.type == "cuda":
@@ -422,7 +433,6 @@ def ensure_retrieval_results_cached(dataset_name, cfg, device):
             corpus_ids=corpus_ids,
             top_k=top_k,
             corpus_chunk_size=dense_cfg.get("corpus_chunk_size", 50000),
-            device=device,
             query_chunk_size=dense_cfg.get("query_chunk_size", 100),
         )
         save_pickle(dense_results, paths["dense_results_pkl"])
@@ -654,10 +664,16 @@ def build_or_load_query_feature_cache(dataset_cache_map, cfg, short_model):
     feature_cache_csv = os.path.join(cache_dir, "query_feature_label_cache.csv")
 
     if file_exists(feature_cache_pkl):
-        cached = load_pickle(feature_cache_pkl)
-        if isinstance(cached, dict) and cached.get("signature") == signature:
-            print("[Feature Cache] Reusing cached per-query feature/label table.")
-            return cached["rows"], feature_cache_pkl, feature_cache_csv
+        try:
+            cached = load_pickle(feature_cache_pkl)
+            if isinstance(cached, dict) and cached.get("signature") == signature:
+                print("[Feature Cache] Reusing cached per-query feature/label table.")
+                return cached["rows"], feature_cache_pkl, feature_cache_csv
+        except Exception as exc:
+            print(
+                "[Feature Cache] Failed to read cache payload; rebuilding. "
+                f"({type(exc).__name__}: {exc})"
+            )
 
     print("[Feature Cache] Building per-query feature/label table from cached retrieval outputs ...")
 
@@ -753,7 +769,7 @@ def rows_to_matrix_with_features(rows, feature_names):
 def resolve_training_feature_names(cfg):
     """Resolve model-specific training feature names.
 
-    XGBoost training/optimization is locked to the selected CORE_PLUS_QUERY set.
+    XGBoost training/optimization is locked to the selected canonical thesis feature set.
     Other models retain the backward-compatible default feature set.
     """
     model_type = get_router_model_type(cfg)
@@ -1177,6 +1193,7 @@ def serialize_router_model(model_bundle):
         return {
             "model_type": model_type,
             "fit_intercept": bool(model.linear.bias is not None),
+            "in_features": int(model.linear.in_features),
             "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         }
 
@@ -1205,8 +1222,9 @@ def deserialize_router_model(serialized, cfg, device):
     """Deserialize fold-cached router model bundle."""
     model_type = serialized.get("model_type")
     if model_type == "logistic":
+        in_features = int(serialized.get("in_features", len(FEATURE_NAMES)))
         model = LogisticRegressor(
-            in_features=len(FEATURE_NAMES),
+            in_features=in_features,
             fit_intercept=bool(serialized.get("fit_intercept", True)),
         ).to(device)
         model.load_state_dict(serialized["state_dict"])
@@ -1708,7 +1726,7 @@ def run_within_dataset_benchmark(
     )
     print(f"Router model type: {model_type}")
     if model_type == "xgboost":
-        print("Using selected feature set: CORE_PLUS_QUERY")
+        print("Using selected feature set: canonical thesis feature set")
         print(f"Features: {training_feature_names}")
     if model_type == "random_forest":
         print(f"RandomForest params: {get_random_forest_config(cfg)}")
@@ -1968,7 +1986,7 @@ def main():
     print(f"Router model type: {model_type}")
     if model_type == "xgboost":
         training_feature_names = resolve_training_feature_names(cfg)
-        print("Using selected feature set: CORE_PLUS_QUERY")
+        print("Using selected feature set: canonical thesis feature set")
         print(f"Features: {training_feature_names}")
     else:
         training_feature_names = resolve_training_feature_names(cfg)

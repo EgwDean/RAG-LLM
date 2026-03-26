@@ -77,10 +77,18 @@ def bm25_signature(k1, b, use_stemming):
     )
 
 
-def bm25_artifact_paths(ds_dir, k1, b, use_stemming):
-    """Return sparse artifact paths for one dataset and BM25 config."""
+def bm25_artifact_paths(ds_dir, k1, b, use_stemming, top_k=None):
+    """Return sparse artifact paths for one dataset and BM25 config.
+
+    BM25 retrieval-result caches are keyed by top_k to avoid stale cache reuse
+    when benchmark.top_k changes.
+    """
     sig = bm25_signature(k1, b, use_stemming)
     stem_flag = f"stem_{1 if use_stemming else 0}"
+    if top_k is None:
+        bm25_results_name = f"{sig}_results.pkl"
+    else:
+        bm25_results_name = f"{sig}_topk_{int(top_k)}_results.pkl"
     return {
         "tokenized_corpus_jsonl": os.path.join(ds_dir, f"tokenized_corpus_{stem_flag}.jsonl"),
         "tokenized_queries_jsonl": os.path.join(ds_dir, f"tokenized_queries_{stem_flag}.jsonl"),
@@ -89,7 +97,7 @@ def bm25_artifact_paths(ds_dir, k1, b, use_stemming):
         "doc_freq_pkl": os.path.join(ds_dir, f"doc_freq_index_{stem_flag}.pkl"),
         "bm25_pkl": os.path.join(ds_dir, f"{sig}.pkl"),
         "bm25_docids_pkl": os.path.join(ds_dir, f"{sig}_doc_ids.pkl"),
-        "bm25_results_pkl": os.path.join(ds_dir, f"{sig}_results.pkl"),
+        "bm25_results_pkl": os.path.join(ds_dir, bm25_results_name),
         "bm25_signature": sig,
     }
 

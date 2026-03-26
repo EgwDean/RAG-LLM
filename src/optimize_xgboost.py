@@ -411,7 +411,7 @@ def optimize_xgboost(cfg, mode):
         rows_by_dataset[ds].sort(key=lambda r: r["query_id"])
 
     feature_names = get_selected_feature_names()
-    print("Using selected feature set: CORE_PLUS_QUERY")
+    print("Using selected feature set: canonical thesis feature set")
     print(f"Features: {feature_names}")
 
     results_root = get_config_path(cfg, "results_folder", "data/results")
