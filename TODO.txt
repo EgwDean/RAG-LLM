@@ -1,6 +1,3 @@
-Run the grid search again for within dataset & loodo
-Add the new parameters 
-Run the retirieval again for within dataset & loodo
 Modify the SHAP plots and the analyze script to output only needed files
 Run the analysis again
 Move all results locally
