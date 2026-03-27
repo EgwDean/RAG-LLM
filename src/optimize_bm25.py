@@ -63,6 +63,11 @@ def set_seed(seed):
     np.random.seed(seed)
 
 
+def _is_nonempty_file(path):
+    """Return True if path exists and has non-zero size."""
+    return file_exists(path) and os.path.getsize(path) > 0
+
+
 def ensure_base_dataset_exports(dataset_name, cfg):
     """Ensure corpus/queries/qrels exports exist for a dataset and return ds_dir."""
     datasets_folder = get_config_path(cfg, "datasets_folder", "data/datasets")
@@ -76,7 +81,7 @@ def ensure_base_dataset_exports(dataset_name, cfg):
     queries_jsonl = os.path.join(ds_dir, "queries.jsonl")
     qrels_tsv = os.path.join(ds_dir, "qrels.tsv")
 
-    if file_exists(corpus_jsonl) and file_exists(queries_jsonl) and file_exists(qrels_tsv):
+    if _is_nonempty_file(corpus_jsonl) and _is_nonempty_file(queries_jsonl) and _is_nonempty_file(qrels_tsv):
         return ds_dir, corpus_jsonl, queries_jsonl, qrels_tsv
 
     dataset_path = download_beir_dataset(dataset_name, datasets_folder)
@@ -105,7 +110,9 @@ def ensure_sparse_artifacts(dataset_name, cfg, k1, b, use_stemming):
     top_k = int(cfg.get("benchmark", {}).get("top_k", 100))
     sparse_paths = u.bm25_artifact_paths(ds_dir, k1, b, use_stemming, top_k=top_k)
 
-    if not file_exists(sparse_paths["tokenized_corpus_jsonl"]):
+    if not _is_nonempty_file(sparse_paths["tokenized_corpus_jsonl"]):
+        if file_exists(sparse_paths["tokenized_corpus_jsonl"]):
+            print("  [WARN] Tokenized corpus cache is empty/incomplete; rebuilding.")
         preprocess_corpus(
             corpus_jsonl=corpus_jsonl,
             output_jsonl=sparse_paths["tokenized_corpus_jsonl"],
@@ -121,10 +128,10 @@ def ensure_sparse_artifacts(dataset_name, cfg, k1, b, use_stemming):
         use_stemming=use_stemming,
     )
 
-    needs_freq = not file_exists(sparse_paths["word_freq_pkl"]) or not file_exists(
+    needs_freq = not _is_nonempty_file(sparse_paths["word_freq_pkl"]) or not _is_nonempty_file(
         sparse_paths["doc_freq_pkl"]
     )
-    needs_bm25 = not file_exists(sparse_paths["bm25_pkl"]) or not file_exists(
+    needs_bm25 = not _is_nonempty_file(sparse_paths["bm25_pkl"]) or not _is_nonempty_file(
         sparse_paths["bm25_docids_pkl"]
     )
 
@@ -163,7 +170,7 @@ def run_or_load_bm25_results(dataset_name, cfg, k1, b, use_stemming):
     sparse_paths = ds_inputs["paths"]
 
     bm25_results = None
-    if file_exists(sparse_paths["bm25_results_pkl"]):
+    if _is_nonempty_file(sparse_paths["bm25_results_pkl"]):
         try:
             bm25_results = load_pickle(sparse_paths["bm25_results_pkl"])
         except Exception as exc:
@@ -174,8 +181,22 @@ def run_or_load_bm25_results(dataset_name, cfg, k1, b, use_stemming):
 
     if bm25_results is None:
         queries = load_queries(ds_inputs["queries_jsonl"])
-        bm25 = load_pickle(sparse_paths["bm25_pkl"])
-        bm25_doc_ids = load_pickle(sparse_paths["bm25_docids_pkl"])
+        try:
+            bm25 = load_pickle(sparse_paths["bm25_pkl"])
+            bm25_doc_ids = load_pickle(sparse_paths["bm25_docids_pkl"])
+        except Exception as exc:
+            print(
+                f"  [WARN] Failed to load BM25 index artifacts for {dataset_name}; rebuilding. "
+                f"({type(exc).__name__}: {exc})"
+            )
+            bm25, bm25_doc_ids, _, _ = build_bm25_and_word_freq_index(
+                sparse_paths["tokenized_corpus_jsonl"],
+                k1=k1,
+                b=b,
+            )
+            save_pickle(bm25, sparse_paths["bm25_pkl"])
+            save_pickle(bm25_doc_ids, sparse_paths["bm25_docids_pkl"])
+
         bm25_results = run_bm25_retrieval(
             bm25=bm25,
             doc_ids=bm25_doc_ids,

@@ -491,7 +491,12 @@ def main():
     ensure_dir(processed_folder)
 
     model_name = cfg["embeddings"]["model_name"]
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    routing_cfg = cfg.get("supervised_routing", {})
+    use_cuda_if_available = bool(routing_cfg.get("use_cuda_if_available", True))
+    device = "cuda" if (use_cuda_if_available and torch.cuda.is_available()) else "cpu"
+
+    if torch.cuda.is_available() and not use_cuda_if_available:
+        print("CUDA is available but disabled by supervised_routing.use_cuda_if_available=false.")
 
     print(f"Device : {device}")
     print(f"Model  : {model_name}")

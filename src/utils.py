@@ -238,7 +238,7 @@ def load_beir_dataset(dataset_path):
     """Load a BEIR dataset from *dataset_path*.
 
     Automatically selects the best available split by checking
-    for test -> train -> dev in the qrels directory.
+    for test -> dev -> train in the qrels directory.
 
     Returns (corpus, queries, qrels, split_name) or (None, ...) on
     failure.

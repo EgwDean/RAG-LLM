@@ -166,6 +166,7 @@ def run_within_dataset_analysis(cfg, datasets, rows_by_dataset, feature_names, d
                 "query_id": qid,
                 "dataset": dataset_name,
                 "alpha": float(alphas[row_idx]),
+                "soft_label": float(y[row_idx]),
             }
             for feat_idx, feat_name in enumerate(feature_names):
                 out_row[feat_name] = float(X_raw[row_idx, feat_idx])
@@ -209,7 +210,7 @@ def run_loodo_analysis(cfg, datasets, rows_by_dataset, feature_names, device, sh
             raise ValueError(f"Fold {heldout}: train/test rows are empty.")
 
         X_train_raw, y_train, _ = rows_to_matrix(train_rows, feature_names)
-        X_test_raw, _, test_qids = rows_to_matrix(test_rows, feature_names)
+        X_test_raw, y_test, test_qids = rows_to_matrix(test_rows, feature_names)
 
         train_mean, train_std = compute_zscore_stats(X_train_raw)
         X_train = apply_zscore(X_train_raw, train_mean, train_std)
@@ -235,6 +236,7 @@ def run_loodo_analysis(cfg, datasets, rows_by_dataset, feature_names, device, sh
                 "query_id": qid,
                 "dataset": heldout,
                 "alpha": float(alphas[row_idx]),
+                "soft_label": float(y_test[row_idx]),
             }
             for feat_idx, feat_name in enumerate(feature_names):
                 out_row[feat_name] = float(X_test_raw[row_idx, feat_idx])
@@ -266,16 +268,17 @@ def write_shap_values_csv(records, output_csv):
 
 
 def write_alpha_analysis_csv(alpha_rows, feature_names, output_csv):
-    """Write alpha-per-query table including all selected feature values."""
+    """Write alpha/label-per-query table including all selected feature values."""
     with open(output_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["query_id", "dataset", "alpha", *feature_names])
+        writer.writerow(["query_id", "dataset", "alpha", "soft_label", *feature_names])
         for row in alpha_rows:
             writer.writerow(
                 [
                     row["query_id"],
                     row["dataset"],
                     f"{row['alpha']:.12f}",
+                    f"{row['soft_label']:.12f}",
                     *[f"{row[name]:.12f}" for name in feature_names],
                 ]
             )
@@ -298,18 +301,25 @@ def write_feature_alpha_correlation_csv(alpha_rows, feature_names, output_csv):
             writer.writerow([feat, f"{corr:.12f}"])
 
 
-def save_shap_plots(shap_module, shap_values, X_for_plots, feature_names, out_dir):
-    """Save SHAP summary, bar, and top-5 dependence plots."""
-    shap_module.summary_plot(
-        shap_values,
-        X_for_plots,
-        feature_names=feature_names,
-        show=False,
-    )
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "shap_summary.png"), dpi=200, bbox_inches="tight")
-    plt.close()
+def write_feature_label_correlation_csv(alpha_rows, feature_names, output_csv):
+    """Compute and write Pearson correlation between soft label and each feature."""
+    labels = np.asarray([float(r["soft_label"]) for r in alpha_rows], dtype=np.float64)
 
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["feature_name", "pearson_correlation"])
+
+        for feat in feature_names:
+            x = np.asarray([float(r[feat]) for r in alpha_rows], dtype=np.float64)
+            if np.std(labels) <= 1.0e-12 or np.std(x) <= 1.0e-12:
+                corr = float("nan")
+            else:
+                corr = float(np.corrcoef(x, labels)[0, 1])
+            writer.writerow([feat, f"{corr:.12f}"])
+
+
+def save_shap_ranking_plot(shap_module, shap_values, X_for_plots, feature_names, out_dir):
+    """Save a single SHAP ranking plot with all features (mean |SHAP| bar ranking)."""
     shap_module.summary_plot(
         shap_values,
         X_for_plots,
@@ -318,44 +328,61 @@ def save_shap_plots(shap_module, shap_values, X_for_plots, feature_names, out_di
         show=False,
     )
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "shap_bar.png"), dpi=200, bbox_inches="tight")
+    plt.savefig(os.path.join(out_dir, "shap_feature_ranking.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
-    mean_abs = np.mean(np.abs(shap_values), axis=0)
-    top_indices = np.argsort(-mean_abs)[: min(5, len(feature_names))]
-    for feat_idx in top_indices:
-        feat_name = feature_names[int(feat_idx)]
-        shap_module.dependence_plot(
-            feat_name,
-            shap_values,
-            X_for_plots,
-            feature_names=feature_names,
-            show=False,
-        )
-        plt.tight_layout()
-        out_name = f"dependence_{sanitize_filename(feat_name)}.png"
-        plt.savefig(os.path.join(out_dir, out_name), dpi=200, bbox_inches="tight")
-        plt.close()
+
+def save_feature_vs_label_plots(alpha_rows, feature_names, out_dir):
+    """Save one grid figure with all features plotted against soft label."""
+    labels = np.asarray([float(r["soft_label"]) for r in alpha_rows], dtype=np.float64)
+    n_features = len(feature_names)
+    n_cols = 4
+    n_rows = int(np.ceil(n_features / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.5 * n_cols, 3.4 * n_rows), squeeze=False)
+    flat_axes = axes.ravel()
+
+    for idx, feat in enumerate(feature_names):
+        ax = flat_axes[idx]
+        x = np.asarray([float(r[feat]) for r in alpha_rows], dtype=np.float64)
+        if np.std(labels) <= 1.0e-12 or np.std(x) <= 1.0e-12:
+            corr = float("nan")
+        else:
+            corr = float(np.corrcoef(x, labels)[0, 1])
+
+        ax.scatter(x, labels, s=10, alpha=0.35)
+        ax.set_title(f"{feat}\nr={corr:.3f}")
+        ax.set_xlabel(feat)
+        ax.set_ylabel("soft_label")
+        ax.grid(alpha=0.2)
+
+    for idx in range(n_features, len(flat_axes)):
+        flat_axes[idx].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "all_features_vs_soft_label.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_alpha_plots(alpha_rows, feature_names, out_dir):
-    """Save alpha distribution and alpha-vs-feature diagnostic plots."""
+    """Save alpha distribution, per-dataset boxplot, and alpha-vs-key-features scatter plots."""
     alphas = np.asarray([float(r["alpha"]) for r in alpha_rows], dtype=np.float64)
+    datasets = sorted(set(r["dataset"] for r in alpha_rows))
 
     plt.figure(figsize=(8, 5))
-    plt.hist(alphas, bins=30, edgecolor="black", linewidth=0.6)
-    plt.title("Alpha distribution")
+    plt.hist(alphas, bins=40)
+    plt.title("Predicted alpha distribution")
     plt.xlabel("alpha")
     plt.ylabel("count")
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "alpha_distribution.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
-    datasets = sorted({r["dataset"] for r in alpha_rows})
-    grouped = [
-        np.asarray([float(r["alpha"]) for r in alpha_rows if r["dataset"] == ds], dtype=np.float64)
-        for ds in datasets
-    ]
+    grouped = []
+    for ds in datasets:
+        arr = np.asarray([float(r["alpha"]) for r in alpha_rows if r["dataset"] == ds], dtype=np.float64)
+        grouped.append(arr)
+
     plt.figure(figsize=(10, 5))
     plt.boxplot(grouped, labels=datasets, showfliers=False)
     plt.title("Alpha per dataset")
@@ -468,13 +495,15 @@ def main():
 
     shap_csv = os.path.join(out_dir, "shap_values.csv")
     alpha_csv = os.path.join(out_dir, "alpha_analysis.csv")
-    corr_csv = os.path.join(out_dir, "feature_alpha_correlation.csv")
+    alpha_corr_csv = os.path.join(out_dir, "feature_alpha_correlation.csv")
+    label_corr_csv = os.path.join(out_dir, "feature_label_correlation.csv")
 
     write_shap_values_csv(output["shap_records"], shap_csv)
     write_alpha_analysis_csv(output["alpha_rows"], feature_names, alpha_csv)
-    write_feature_alpha_correlation_csv(output["alpha_rows"], feature_names, corr_csv)
+    write_feature_alpha_correlation_csv(output["alpha_rows"], feature_names, alpha_corr_csv)
+    write_feature_label_correlation_csv(output["alpha_rows"], feature_names, label_corr_csv)
 
-    save_shap_plots(
+    save_shap_ranking_plot(
         shap_module,
         output["shap_values"],
         output["shap_input_matrix"],
@@ -482,15 +511,16 @@ def main():
         out_dir,
     )
     save_alpha_plots(output["alpha_rows"], feature_names, out_dir)
+    save_feature_vs_label_plots(output["alpha_rows"], feature_names, out_dir)
 
     print("\nAnalysis completed.")
     print(f"Output directory: {out_dir}")
     print(f"- {shap_csv}")
     print(f"- {alpha_csv}")
-    print(f"- {corr_csv}")
-    print("- shap_summary.png")
-    print("- shap_bar.png")
-    print("- dependence_*.png")
+    print(f"- {alpha_corr_csv}")
+    print(f"- {label_corr_csv}")
+    print("- shap_feature_ranking.png")
+    print("- all_features_vs_soft_label.png")
     print("- alpha_distribution.png")
     print("- alpha_per_dataset.png")
     print("- alpha_vs_feature_*.png")

@@ -118,9 +118,16 @@ def ensure_english_stopwords():
         return set(stopwords.words("english"))
 
 
-def _missing_paths(paths):
-    """Return all paths that do not exist."""
-    return [p for p in paths if not file_exists(p)]
+def _missing_or_empty_paths(paths):
+    """Return file paths that are missing or empty."""
+    missing = []
+    for p in paths:
+        try:
+            if (not file_exists(p)) or os.path.getsize(p) <= 0:
+                missing.append(p)
+        except OSError:
+            missing.append(p)
+    return missing
 
 
 def normalize_scores_minmax(pairs, epsilon=1.0e-8):
@@ -189,11 +196,15 @@ def evaluate_benchmark_methods_for_qids(
     alpha_map=None,
 ):
     """Evaluate benchmark methods over a supplied query-id subset."""
-    sparse_scores, dense_scores = bm25_and_dense_to_score_maps(bm25_results, dense_results)
-    static_rrf_scores = apply_static_rrf(bm25_results, dense_results, rrf_k=rrf_k)
+    qids = list(query_ids)
+    bm25_subset = {qid: bm25_results.get(qid, []) for qid in qids}
+    dense_subset = {qid: dense_results.get(qid, []) for qid in qids}
+
+    sparse_scores, dense_scores = bm25_and_dense_to_score_maps(bm25_subset, dense_subset)
+    static_rrf_scores = apply_static_rrf(bm25_subset, dense_subset, rrf_k=rrf_k)
     if alpha_map is None:
         alpha_map = {}
-    dynamic_scores = apply_dynamic_wrrf(bm25_results, dense_results, alpha_map, rrf_k=rrf_k)
+    dynamic_scores = apply_dynamic_wrrf(bm25_subset, dense_subset, alpha_map, rrf_k=rrf_k)
 
     return {
         "dense_only_ndcg": calculate_dataset_ndcg_at_k_subset(dense_scores, qrels, ndcg_k, query_ids),
@@ -351,7 +362,7 @@ def prepare_dataset_inputs(dataset_name, cfg):
         "bm25_signature": bm25_paths["bm25_signature"],
     }
 
-    missing = _missing_paths([
+    missing = _missing_or_empty_paths([
         paths["queries_jsonl"],
         paths["qrels_tsv"],
         paths["tokenized_corpus_jsonl"],
@@ -367,7 +378,7 @@ def prepare_dataset_inputs(dataset_name, cfg):
     ])
     if missing:
         raise FileNotFoundError(
-            "Missing preprocessing artifacts for "
+            "Missing/empty preprocessing artifacts for "
             f"{dataset_name}:\n  - " + "\n  - ".join(missing)
         )
 
@@ -2262,6 +2273,18 @@ def main():
         # Held-out dataset uses training-fold normalization statistics.
         X_test = apply_zscore(X_test_raw, train_mean, train_std)
 
+        ds_cache = dataset_cache_map[heldout]
+        bm25_results = ds_cache["bm25_results"]
+        dense_results = ds_cache["dense_results"]
+        qrels = ds_cache["qrels"]
+
+        sparse_scores, dense_scores = bm25_and_dense_to_score_maps(bm25_results, dense_results)
+        static_rrf_scores = apply_static_rrf(bm25_results, dense_results, rrf_k=rrf_k)
+
+        dense_only_ndcg = calculate_dataset_ndcg_at_k(dense_scores, qrels, ndcg_k)
+        sparse_only_ndcg = calculate_dataset_ndcg_at_k(sparse_scores, qrels, ndcg_k)
+        static_rrf_ndcg = calculate_dataset_ndcg_at_k(static_rrf_scores, qrels, ndcg_k)
+
         repeat_metrics = []
         for repeat_idx in range(loodo_n_repeats):
             repeat = repeat_idx + 1
@@ -2430,18 +2453,7 @@ def main():
                 for qid, alpha in zip(test_qids, alphas)
             )
 
-            ds_cache = dataset_cache_map[heldout]
-            bm25_results = ds_cache["bm25_results"]
-            dense_results = ds_cache["dense_results"]
-            qrels = ds_cache["qrels"]
-
-            sparse_scores, dense_scores = bm25_and_dense_to_score_maps(bm25_results, dense_results)
-            static_rrf_scores = apply_static_rrf(bm25_results, dense_results, rrf_k=rrf_k)
             dynamic_scores = apply_dynamic_wrrf(bm25_results, dense_results, alpha_map, rrf_k=rrf_k)
-
-            dense_only_ndcg = calculate_dataset_ndcg_at_k(dense_scores, qrels, ndcg_k)
-            sparse_only_ndcg = calculate_dataset_ndcg_at_k(sparse_scores, qrels, ndcg_k)
-            static_rrf_ndcg = calculate_dataset_ndcg_at_k(static_rrf_scores, qrels, ndcg_k)
             dynamic_wrrf_ndcg = calculate_dataset_ndcg_at_k(dynamic_scores, qrels, ndcg_k)
 
             print(
